@@ -22,6 +22,8 @@ export const config = {
   /** How long a disconnected session stays resumable. */
   resumeGraceMs: int('RESUME_GRACE_MS', 10 * 60 * 1000),
   maxViolations: int('MAX_INTEGRITY_VIOLATIONS', 3),
+  /** When set, listing sessions and reading reports requires this key. */
+  reviewerKey: process.env.REVIEWER_KEY ?? '',
   /** Run with a scripted model when no API key is configured. */
   get mock(): boolean {
     return process.env.MOCK_LIVE === '1' || !this.geminiApiKey;
