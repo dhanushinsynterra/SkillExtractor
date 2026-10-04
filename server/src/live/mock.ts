@@ -106,7 +106,8 @@ export async function connectMock(_options: ConnectOptions, h: LiveModelHandlers
         h.onTurnComplete();
         return;
       }
-      candidateTurnEnded(text);
+      // The bridge has already recorded typed text, so just move the script on.
+      advance();
     },
     sendToolResponses(_responses: ToolResponse[]) {},
     close() {
