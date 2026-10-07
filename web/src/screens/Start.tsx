@@ -1,9 +1,10 @@
-import { useState } from 'react';
-import { ArrowRight, Check, Clock, Headphones, MessageSquare, ShieldCheck } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { AlertTriangle, ArrowRight, Check, Clock, Headphones, Loader2, MessageSquare, ShieldCheck } from 'lucide-react';
 import { Steps, TopBar } from '../components/Chrome';
-import { TRACKS, setCandidate, useCandidate } from '../lib/candidate';
+import { AI_NAME, TRACKS } from '../../../shared/types';
+import { api } from '../lib/api';
+import { setCandidate, useCandidate } from '../lib/candidate';
 import { navigate } from '../lib/router';
-import { AI_NAME } from '../lib/script';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -14,6 +15,35 @@ export default function Start() {
   const nameOk = c.name.trim().length >= 2;
   const emailOk = EMAIL_RE.test(c.email.trim());
   const canGo = nameOk && emailOk && consent;
+  const [ready, setReady] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .status()
+      .then((s) => setReady(s.ready))
+      .catch((e) => {
+        setReady(false);
+        setErr(e.message);
+      });
+  }, []);
+
+  async function submit() {
+    setTouched(true);
+    if (!canGo || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const session = await api.createSession({ name: c.name.trim(), email: c.email.trim(), track: c.track });
+      setCandidate({ session });
+      navigate('/check');
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="flow">
@@ -75,8 +105,7 @@ export default function Start() {
           className="panel form"
           onSubmit={(e) => {
             e.preventDefault();
-            setTouched(true);
-            if (canGo) navigate('/check');
+            void submit();
           }}
           noValidate
         >
@@ -146,8 +175,21 @@ export default function Start() {
             </span>
           </label>
 
-          <button className="btn btn--primary btn--lg btn--block" type="submit" aria-disabled={!canGo}>
-            Continue to device check <ArrowRight size={18} />
+          {ready === false && (
+            <div className="notice notice--warn" role="alert">
+              <AlertTriangle size={16} />
+              <span>{err ?? 'Interviews are not available yet. The hiring team needs to finish setup.'}</span>
+            </div>
+          )}
+          {ready && err && (
+            <div className="notice notice--warn" role="alert">
+              <AlertTriangle size={16} />
+              <span>{err}</span>
+            </div>
+          )}
+          <button className="btn btn--primary btn--lg btn--block" type="submit" disabled={!ready || busy} aria-disabled={!canGo}>
+            {busy ? <Loader2 size={18} className="spin" /> : null}
+            Continue to device check {!busy && <ArrowRight size={18} />}
           </button>
         </form>
       </main>

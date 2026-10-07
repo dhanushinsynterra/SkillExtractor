@@ -1,197 +1,227 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CandidateDraft } from './candidate';
-import { ack, applyEdit, buildScript, CODE_CARDS, isFixed, REASSURE, type CodeCard, type Phase } from './script';
-import { canRecognise, listenOnce, speak, stopSpeaking } from './speech';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ClientMessage, CodeCardView, IntegrityKind, Phase, ServerMessage } from '../../../shared/types';
+import { levelOf, MicStreamer, Player } from './audio';
 
 /**
- * Scripted stand-in for the Gemini Live session. Same surface the real
- * WebSocket client will expose: status, phase, transcript, code card, and
- * submit/mute/end controls.
+ * Client side of a live interview: WebSocket to the server (which bridges to
+ * Gemini Live), microphone streaming, audio playback and transcript state.
  */
 
-export type InterviewStatus = 'idle' | 'speaking' | 'listening' | 'thinking' | 'ended';
+export type InterviewStatus = 'idle' | 'connecting' | 'reconnecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
 
 export interface Turn {
   id: number;
-  who: 'ai' | 'you';
+  who: 'ai' | 'candidate';
   text: string;
-  note?: string;
+  final: boolean;
 }
 
-export interface CodeState {
-  card: CodeCard;
-  lines: string[];
-  changed: number | null;
-  solved: boolean;
-  feedback: string | null;
+interface Options {
+  session: { id: string; token: string };
+  stream: MediaStream | null;
+  /** Element whose --level custom property follows the active voice. */
+  levelTarget: React.RefObject<HTMLElement | null>;
 }
 
-const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const MAX_RECONNECT_MS = 60_000;
 
-export function useInterview(candidate: CandidateDraft, opts: { voice: boolean }) {
-  const script = useMemo(() => buildScript(candidate), [candidate]);
+export function useInterview({ session, stream, levelTarget }: Options) {
   const [status, setStatus] = useState<InterviewStatus>('idle');
   const [phase, setPhase] = useState<Phase>('hello');
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [interim, setInterim] = useState('');
+  const [code, setCode] = useState<CodeCardView | null>(null);
   const [micOn, setMicOn] = useState(true);
-  const [code, setCode] = useState<CodeState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [endReason, setEndReason] = useState<string | null>(null);
 
-  const stepRef = useRef(0);
+  const ws = useRef<WebSocket | null>(null);
+  const player = useRef<Player | null>(null);
+  const mic = useRef<MicStreamer | null>(null);
+  const micAnalyser = useRef<AnalyserNode | null>(null);
+  const micOnRef = useRef(micOn);
+  const ready = useRef(false);
+  const ended = useRef(false);
+  const awaitingReply = useRef(false);
   const idRef = useRef(0);
-  const listenRef = useRef<{ cancel: () => void } | null>(null);
-  const aliveRef = useRef(true);
-  const voiceRef = useRef(opts.voice);
-  const micRef = useRef(micOn);
-  const codeRef = useRef(code);
-  voiceRef.current = opts.voice;
-  micRef.current = micOn;
-  codeRef.current = code;
+  const reconnectStart = useRef(0);
+  micOnRef.current = micOn;
 
-  const push = useCallback((who: Turn['who'], text: string, note?: string) => {
-    setTurns((t) => [...t, { id: ++idRef.current, who, text, note }]);
+  const sendMsg = useCallback((m: ClientMessage) => {
+    if (ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify(m));
   }, []);
 
-  const say = useCallback(
-    async (text: string) => {
-      setStatus('speaking');
-      push('ai', text);
-      if (voiceRef.current) await speak(text);
-      else await wait(Math.min(2400, 500 + text.length * 14));
+  const appendDelta = useCallback((who: Turn['who'], delta: string) => {
+    setTurns((ts) => {
+      const last = ts[ts.length - 1];
+      if (last && last.who === who && !last.final) {
+        return [...ts.slice(0, -1), { ...last, text: last.text + delta }];
+      }
+      // A new speaker closes the previous turn.
+      const closed = last && !last.final ? [...ts.slice(0, -1), { ...last, final: true }] : ts;
+      return [...closed, { id: ++idRef.current, who, text: delta.trimStart(), final: false }];
+    });
+  }, []);
+
+  const onServer = useCallback(
+    (m: ServerMessage) => {
+      switch (m.type) {
+        case 'ready':
+          ready.current = true;
+          reconnectStart.current = 0;
+          setError(null);
+          setPhase(m.phase);
+          setCode(m.code);
+          if (m.resumed) setTurns(m.transcript.map((t) => ({ id: ++idRef.current, who: t.who, text: t.text, final: true })));
+          setStatus('listening');
+          break;
+        case 'transcript':
+          if (m.who === 'candidate') awaitingReply.current = true;
+          else awaitingReply.current = false;
+          appendDelta(m.who, m.delta);
+          break;
+        case 'turn_complete':
+          setTurns((ts) => ts.map((t) => (t.final ? t : { ...t, final: true })));
+          break;
+        case 'interrupted':
+          player.current?.flush();
+          break;
+        case 'phase':
+          setPhase(m.phase);
+          break;
+        case 'code':
+          setCode(m.code);
+          break;
+        case 'ended':
+          ended.current = true;
+          setEndReason(m.reason);
+          setStatus('ended');
+          break;
+        case 'error':
+          setError(m.message);
+          break;
+      }
     },
-    [push],
+    [appendDelta],
   );
 
-  const listen = useCallback(() => {
-    if (!aliveRef.current) return;
-    setStatus('listening');
-    setInterim('');
-    if (!canRecognise || !micRef.current) return;
-    const l = listenOnce(setInterim);
-    listenRef.current = l;
-    l.done.then((text) => {
-      if (listenRef.current !== l) return;
-      listenRef.current = null;
-      if (text) handleReply(text);
-      else if (aliveRef.current) listen();
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const runStep = useCallback(
-    async (i: number, prefix?: string) => {
-      const step = script[i];
-      if (!step || !aliveRef.current) return;
-      stepRef.current = i;
-      setPhase(step.phase);
-      if (step.expect === 'code' && !codeRef.current) {
-        const card = CODE_CARDS[candidate.track];
-        setCode({ card, lines: [...card.lines], changed: null, solved: false, feedback: null });
-      }
-      await say(prefix ? `${prefix} ${step.say}` : step.say);
-      if (!aliveRef.current) return;
-      if (step.expect === 'none') {
+  const connect = useCallback(() => {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const sock = new WebSocket(`${proto}://${location.host}/ws/sessions/${session.id}?token=${encodeURIComponent(session.token)}`);
+    sock.binaryType = 'arraybuffer';
+    ws.current = sock;
+    sock.onopen = () => sock.send(JSON.stringify({ type: 'start' } satisfies ClientMessage));
+    sock.onmessage = (e) => {
+      if (e.data instanceof ArrayBuffer) {
+        awaitingReply.current = false;
+        player.current?.play(e.data);
+      } else onServer(JSON.parse(e.data) as ServerMessage);
+    };
+    sock.onclose = (e) => {
+      if (ws.current !== sock || ended.current) return;
+      ready.current = false;
+      if (e.code === 4001) {
+        ended.current = true;
         setStatus('ended');
         return;
       }
-      listen();
-    },
-    [script, say, listen, candidate.track],
-  );
-
-  // Reference kept stable via ref so recognition callbacks see the latest.
-  const handleReplyRef = useRef<(text: string) => void>(() => {});
-  function handleReply(text: string) {
-    handleReplyRef.current(text);
-  }
-
-  handleReplyRef.current = async (text: string) => {
-    listenRef.current?.cancel();
-    listenRef.current = null;
-    setInterim('');
-    const step = script[stepRef.current];
-    if (!step || status === 'ended') return;
-
-    if (step.expect === 'code' && code) {
-      const res = applyEdit(code.lines, text);
-      if (!res.ok) {
-        push('you', text);
-        setCode({ ...code, feedback: res.reason });
-        setStatus('thinking');
-        await wait(500);
-        await say(res.reason);
-        listen();
+      if (!reconnectStart.current) reconnectStart.current = Date.now();
+      if (Date.now() - reconnectStart.current > MAX_RECONNECT_MS) {
+        setStatus('error');
+        setError('Lost connection to the interview server.');
         return;
       }
-      const lines = code.lines.map((l, idx) => (idx === res.line - 1 ? res.after : l));
-      const solved = isFixed(code.card, lines);
-      push('you', text, `Line ${res.line} edited`);
-      setCode({ ...code, lines, changed: res.line, solved, feedback: null });
-      setStatus('thinking');
-      await wait(900);
-      if (solved) return runStep(stepRef.current + 1);
-      await say(`Applied to line ${res.line}. The code still isn't correct. ${code.card.hint}`);
-      listen();
-      return;
-    }
+      setStatus('reconnecting');
+      setTimeout(connect, 1500);
+    };
+  }, [session.id, session.token, onServer]);
 
-    push('you', text);
-    setStatus('thinking');
-    await wait(900 + Math.random() * 600);
-    const words = text.trim().split(/\s+/).length;
-    const deep = step.phase === 'domain' || step.phase === 'problem';
-    if (deep && words < 5 && !turns.some((t) => t.note === 'reassured')) {
-      push('ai', REASSURE, 'reassured');
-      setStatus('speaking');
-      if (voiceRef.current) await speak(REASSURE);
-      else await wait(1600);
-      listen();
-      return;
-    }
-    runStep(stepRef.current + 1, step.phase === 'hello' ? undefined : ack(stepRef.current));
-  };
-
-  const start = useCallback(() => {
-    aliveRef.current = true;
-    runStep(0);
-  }, [runStep]);
-
-  const submit = useCallback((text: string) => {
-    if (text.trim()) handleReply(text.trim());
-  }, []);
-
-  const toggleMic = useCallback(() => {
-    setMicOn((on) => {
-      if (on) {
-        listenRef.current?.cancel();
-        listenRef.current = null;
-        setInterim('');
+  /** Must be called from a user gesture (audio contexts need one). */
+  const start = useCallback(async (mediaStream: MediaStream | null = stream) => {
+    if (ws.current) return;
+    setStatus('connecting');
+    setError(null);
+    player.current = new Player();
+    await player.current.resume();
+    if (mediaStream?.getAudioTracks().length) {
+      mic.current = new MicStreamer((pcm) => {
+        if (micOnRef.current && ready.current && ws.current?.readyState === WebSocket.OPEN) ws.current.send(pcm);
+      });
+      try {
+        micAnalyser.current = await mic.current.start(mediaStream);
+      } catch (e) {
+        console.error('Microphone pipeline failed', e);
       }
-      return !on;
-    });
-  }, []);
+    }
+    connect();
+  }, [stream, connect]);
 
-  // Restart recognition when the mic comes back on mid-listen.
+  // Drive status (speaking / thinking / listening) and the level indicator.
   useEffect(() => {
-    if (micOn && status === 'listening' && !listenRef.current) listen();
-  }, [micOn, status, listen]);
-
-  const end = useCallback(() => {
-    aliveRef.current = false;
-    listenRef.current?.cancel();
-    stopSpeaking();
-    setStatus('ended');
-  }, []);
+    if (status === 'idle' || status === 'ended' || status === 'error') return;
+    const buf = new Float32Array(1024);
+    let raf = 0;
+    let last = '';
+    const loop = () => {
+      const p = player.current;
+      const speaking = Boolean(p?.playing);
+      let next: InterviewStatus | null = null;
+      if (ready.current) next = speaking ? 'speaking' : awaitingReply.current ? 'thinking' : 'listening';
+      if (!next) last = '';
+      else if (next !== last) {
+        last = next;
+        setStatus(next);
+      }
+      let level = 0;
+      if (speaking && p) level = levelOf(p.analyser, buf);
+      else if (micAnalyser.current && micOnRef.current) level = levelOf(micAnalyser.current, buf);
+      levelTarget.current?.style.setProperty('--level', level.toFixed(3));
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [status === 'idle' || status === 'ended' || status === 'error', levelTarget]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(
     () => () => {
-      aliveRef.current = false;
-      listenRef.current?.cancel();
-      stopSpeaking();
+      ended.current = true;
+      ws.current?.close();
+      mic.current?.stop();
+      player.current?.close();
     },
     [],
   );
 
-  const stepIndex = stepRef.current;
-  return { status, phase, turns, interim, micOn, code, stepIndex, total: script.length, start, submit, toggleMic, end };
+  const submitText = useCallback(
+    (text: string) => {
+      const t = text.trim();
+      if (!t) return;
+      setTurns((ts) => [...ts.map((x) => (x.final ? x : { ...x, final: true })), { id: ++idRef.current, who: 'candidate', text: t, final: true }]);
+      awaitingReply.current = true;
+      player.current?.flush();
+      sendMsg({ type: 'text', text: t });
+    },
+    [sendMsg],
+  );
+
+  const toggleMic = useCallback(() => {
+    setMicOn((on) => {
+      sendMsg({ type: 'mic', on: !on });
+      return !on;
+    });
+  }, [sendMsg]);
+
+  const setVolume = useCallback((on: boolean) => {
+    if (player.current) player.current.volume = on ? 1 : 0;
+  }, []);
+
+  const integrity = useCallback((kind: IntegrityKind, note: string) => sendMsg({ type: 'integrity', kind, note }), [sendMsg]);
+
+  const end = useCallback(() => {
+    sendMsg({ type: 'end' });
+    ended.current = true;
+    setStatus('ended');
+    setEndReason('ended_by_candidate');
+  }, [sendMsg]);
+
+  return { status, phase, turns, code, micOn, error, endReason, start, submitText, toggleMic, setVolume, integrity, end };
 }

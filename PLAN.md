@@ -7,13 +7,14 @@ A voice-based AI interviewer ("Aria") that assesses a candidate's real skill dep
 | Route | Who | What |
 | --- | --- | --- |
 | `/` | Candidate | Welcome and details (name, email, track, consent) |
-| `/check` | Candidate | Microphone level meter, camera preview, speaker test, network check, audio-only option |
-| `/session` | Candidate | Live interview: voice orb, stage progress, live transcript, code-review card, typed fallback |
+| `/check` | Candidate | Mic level meter, camera preview, face detection, speaker test, network check, audio-only option |
+| `/session` | Candidate | Gemini Live voice interview: waveform, stage progress, live transcript, code-review card, typed fallback, presence alerts |
 | `/done` | Candidate | Confirmation, personal feedback summary, next steps |
-| `/admin` | Hiring team | Openings with progress, KPIs, candidate list with filters and search |
-| `/admin/report/:id` | Hiring team | Report with Manager, HR and Tech views |
+| `/admin` | Hiring team | Live and past interviews, KPIs, filters and search, candidate link |
+| `/admin/settings` | Hiring team | Gemini API key, interviewer voice, live and report models |
+| `/admin/report/:id` | Hiring team | Report with Manager, HR, Tech and Transcript views; retry or delete |
 
-UI is dark-only, built with React + TypeScript + Vite.
+UI is dark-only, built with React + TypeScript + Vite. The server is Express + ws, and the voice runs on Gemini Live.
 
 ## Interview stages
 
@@ -35,7 +36,7 @@ India has no GDPR-style regime, but the **Digital Personal Data Protection Act, 
 
 ## Build phases
 
-1. **UI with a scripted demo engine** (done). Real mic meter and camera, browser speech synthesis and recognition when available, typed fallback, seeded admin data.
-2. **Backend.** Express + WebSockets, a Gemini Live bridge, a session store with resume, skill knowledge-graph tools, the code-card engine and admin authentication.
-3. **Signals.** Acoustic nervousness detection leading to reassurance, webcam gaze and phone detection, a voice-consistency flag.
-4. **Admin operations.** Real openings, invite links, CSV export, roles and audit log.
+1. **UI** (done). Dark candidate flow and admin console.
+2. **Backend** (done). Express + WebSockets, Gemini Live voice bridge, interviewer tools (phases, skill notes, code card), file-based session store, AI-written reports, admin settings for the API key, voice and models.
+3. **Signals** (partly done). Webcam face presence and multiple-face detection, plus tab switching, with the interviewer reacting live. Still to do: acoustic nervousness cues and a voice-consistency check.
+4. **Admin operations.** Openings and invite links per role, CSV export, roles and audit log, a database instead of JSON files.

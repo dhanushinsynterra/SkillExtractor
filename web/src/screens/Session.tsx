@@ -1,20 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowRight, Captions, CaptionsOff, Keyboard, Lightbulb, Mic, MicOff, PhoneOff, Send, ShieldCheck, Volume2, VolumeX } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Captions, CaptionsOff, Keyboard, Loader2, Mic, MicOff, PhoneOff, Send, ShieldCheck, UserX, Users, Volume2, VolumeX } from 'lucide-react';
+import { AI_NAME, PHASES } from '../../../shared/types';
 import { Logo } from '../components/Chrome';
 import { Voice } from '../components/Voice';
-import { useCandidate } from '../lib/candidate';
-import { acquireMedia, currentMedia, useMicLevel } from '../lib/media';
+import { useCandidate, firstName } from '../lib/candidate';
+import { acquireMedia, currentMedia } from '../lib/media';
+import { Proctor, type Presence } from '../lib/proctor';
 import { navigate } from '../lib/router';
-import { PHASES } from '../lib/script';
-import { canRecognise } from '../lib/speech';
-import { useInterview, type CodeState, type InterviewStatus } from '../lib/useInterview';
+import { useInterview, type InterviewStatus } from '../lib/useInterview';
+import type { CodeCardView } from '../../../shared/types';
 
 const STATUS_TEXT: Record<InterviewStatus, string> = {
   idle: 'Ready when you are',
-  speaking: 'Aria is speaking',
-  listening: 'Your turn',
-  thinking: 'Aria is thinking',
+  connecting: 'Connecting',
+  reconnecting: 'Reconnecting',
+  listening: 'Listening',
+  thinking: 'Thinking',
+  speaking: `${AI_NAME} is speaking`,
   ended: 'Interview complete',
+  error: 'Connection problem',
 };
 
 function useClock(running: boolean) {
@@ -27,21 +31,16 @@ function useClock(running: boolean) {
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 
-function CodeCardView({ code, onHint }: { code: CodeState; onHint: () => void }) {
+function CodeCard({ code }: { code: CodeCardView }) {
   return (
-    <section className={`codecard ${code.solved ? 'codecard--solved' : ''}`} aria-label="Code card">
+    <section className={`codecard ${code.solved ? 'codecard--solved' : ''}`} aria-label="Code review">
       <header className="codecard-head">
-        <span className="codecard-dots" aria-hidden="true">
-          <i />
-          <i />
-          <i />
-        </span>
-        <span className="codecard-file">{code.card.title}</span>
-        <span className="codecard-lang">{code.card.language}</span>
+        <span className="codecard-file">{code.title}</span>
+        <span className="codecard-lang">{code.language}</span>
       </header>
       <ol className="codecard-lines">
         {code.lines.map((l, i) => (
-          <li key={i} className={code.changed === i + 1 ? (code.solved ? 'is-fixed' : 'is-changed') : ''}>
+          <li key={i} className={code.changedLine === i + 1 ? (code.solved ? 'is-fixed' : 'is-changed') : ''}>
             <span className="ln">{i + 1}</span>
             <code>{l || ' '}</code>
           </li>
@@ -50,16 +49,10 @@ function CodeCardView({ code, onHint }: { code: CodeState; onHint: () => void })
       <footer className="codecard-foot">
         {code.solved ? (
           <span className="status status--ok">Fixed</span>
-        ) : code.feedback ? (
-          <span className="codecard-feedback">{code.feedback}</span>
         ) : (
-          <span className="muted small">Say or type: “line 3, change X to Y”</span>
+          <span>Tell {AI_NAME} which line to change and what to change it to.</span>
         )}
-        {!code.solved && (
-          <button className="btn btn--ghost btn--sm" onClick={onHint}>
-            <Lightbulb size={15} /> Hint
-          </button>
-        )}
+        {code.attempts > 0 && <span className="mono-sm">{code.attempts} edit{code.attempts > 1 ? 's' : ''}</span>}
       </footer>
     </section>
   );
@@ -67,62 +60,99 @@ function CodeCardView({ code, onHint }: { code: CodeState; onHint: () => void })
 
 export default function Session() {
   const candidate = useCandidate();
-  const [voice, setVoice] = useState(true);
+  const session = candidate.session;
   const [started, setStarted] = useState(false);
-  const [showCaptions, setShowCaptions] = useState(true);
-  const [typing, setTyping] = useState(!canRecognise);
+  const [showTranscript, setShowTranscript] = useState(true);
+  const [typing, setTyping] = useState(false);
   const [draft, setDraft] = useState('');
-  const [hint, setHint] = useState(false);
+  const [voiceOn, setVoiceOn] = useState(true);
   const [stream, setStream] = useState<MediaStream | null>(currentMedia());
-  const m = useInterview(candidate, { voice });
-  const clock = useClock(started && m.status !== 'ended');
-  const orbRef = useRef<HTMLDivElement>(null);
+  const [presence, setPresence] = useState<Presence>('unknown');
+  const voiceRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const logRef = useRef<HTMLOListElement>(null);
-  useMicLevel(m.status === 'listening' && m.micOn ? stream : null, orbRef);
+
+  const m = useInterview({ session: session ?? { id: '', token: '' }, stream, levelTarget: voiceRef });
+  const live = started && m.status !== 'ended' && m.status !== 'error';
+  const clock = useClock(live);
+  const hasVideo = Boolean(stream?.getVideoTracks().length);
+  const integrity = m.integrity;
 
   useEffect(() => {
-    if (!candidate.name) navigate('/', 'back');
-  }, [candidate.name]);
+    if (!session) navigate('/', 'back');
+  }, [session]);
+
+  // Camera preview + presence detection, reported to the interviewer.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !stream || !hasVideo || !started) return;
+    v.srcObject = stream;
+    let prev: Presence = 'unknown';
+    const p = new Proctor(v, (next) => {
+      setPresence(next);
+      if (next === 'absent') integrity('absent', 'No face visible on camera.');
+      else if (next === 'multiple') integrity('multiple_faces', 'More than one face visible on camera.');
+      else if (next === 'present' && (prev === 'absent' || prev === 'multiple')) integrity('returned', 'Candidate is visible again.');
+      prev = next;
+    });
+    p.start().catch(() => integrity('camera_off', 'Face detection could not load in the browser.'));
+    return () => p.stop();
+  }, [stream, hasVideo, started, integrity]);
+
+  // Switching tabs or windows during the interview.
+  useEffect(() => {
+    if (!started) return;
+    let t: number | undefined;
+    const onVis = () => {
+      clearTimeout(t);
+      if (document.hidden) t = window.setTimeout(() => integrity('tab_hidden', 'Interview window was hidden for more than 3 seconds.'), 3000);
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [started, integrity]);
 
   useEffect(() => {
-    if (videoRef.current && stream?.getVideoTracks().length) videoRef.current.srcObject = stream;
-  }, [stream, started]);
+    logRef.current?.lastElementChild?.scrollIntoView({ block: 'end' });
+  }, [m.turns]);
 
   useEffect(() => {
-    logRef.current?.lastElementChild?.scrollIntoView({ block: 'end', behavior: 'smooth' });
-  }, [m.turns.length, m.interim]);
-
-  useEffect(() => {
-    if (m.status !== 'ended' || !started) return;
-    const t = setTimeout(() => navigate('/done'), 2600);
+    if (m.status !== 'ended') return;
+    const t = setTimeout(() => navigate('/done'), 2000);
     return () => clearTimeout(t);
-  }, [m.status, started]);
+  }, [m.status]);
+
+  useEffect(() => m.setVolume(voiceOn), [voiceOn, m.setVolume]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function begin() {
-    if (!stream) {
+    let s = stream;
+    if (!s) {
       try {
-        setStream(await acquireMedia(!candidate.audioOnly));
+        s = await acquireMedia(!candidate.audioOnly);
+        setStream(s);
       } catch {
         setTyping(true);
       }
     }
     setStarted(true);
-    m.start();
+    await m.start(s);
   }
+
+  if (!session) return null;
 
   const lastAi = [...m.turns].reverse().find((t) => t.who === 'ai');
   const phaseIdx = PHASES.findIndex((p) => p.id === m.phase);
-  const hasVideo = Boolean(stream?.getVideoTracks().length);
 
   return (
-    <div className={`session ${m.code ? 'session--code' : ''} ${showCaptions && started ? 'session--captions' : ''}`}>
+    <div className={`session ${m.code ? 'session--code' : ''} ${showTranscript && started ? 'session--captions' : ''}`}>
       <header className="session-bar">
         <div className="session-brand">
-          <Logo size={26} />
-          <span className="hide-sm">Interview</span>
+          <Logo />
+          <span>Interview</span>
         </div>
-        <ol className="phase-track" aria-label="Conversation progress">
+        <ol className="phase-track" aria-label="Interview progress">
           {PHASES.map((p, i) => (
             <li key={p.id} className={i < phaseIdx ? 'done' : i === phaseIdx && started ? 'current' : ''} aria-current={i === phaseIdx ? 'step' : undefined}>
               <span className="phase-dot" />
@@ -139,67 +169,99 @@ export default function Session() {
 
       <main className="session-main">
         <section className="stage" aria-live="polite">
-          <Voice ref={orbRef} state={started ? m.status : 'idle'} size={m.code ? 'md' : 'lg'} />
-          <p className={`stage-status stage-status--${m.status}`}>
-            {m.status === 'listening' && m.micOn && canRecognise && <span className="pulse-dot" />}
-            {started ? STATUS_TEXT[m.status] : STATUS_TEXT.idle}
-            {m.status === 'listening' && !m.micOn && ' · mic is muted, type below'}
-          </p>
+          {presence === 'absent' && live && (
+            <div className="presence-alert" role="alert">
+              <UserX size={16} /> You’re not visible on camera. Please return to your seat. {AI_NAME} has paused.
+            </div>
+          )}
+          {presence === 'multiple' && live && (
+            <div className="presence-alert" role="alert">
+              <Users size={16} /> More than one person is visible. The interview must be completed on your own.
+            </div>
+          )}
+
+          <Voice ref={voiceRef} state={!started ? 'idle' : m.status === 'speaking' ? 'speaking' : m.status === 'thinking' ? 'thinking' : m.status === 'listening' && m.micOn ? 'listening' : 'idle'} size={m.code ? 'md' : 'lg'} />
+
           {!started ? (
             <div className="stage-intro">
               <h1 data-route-focus tabIndex={-1}>
-                Hi {candidate.name.split(' ')[0] || 'there'}, I’m Aria.
+                Ready, {firstName(candidate.name)}?
               </h1>
-              <p className="muted">When you’re ready, start the interview and I’ll introduce myself. Speak naturally, there’s no rush.</p>
+              <p className="muted">
+                {AI_NAME} will open the conversation and guide you through each stage. Speak naturally. You can interrupt at any time.
+              </p>
               <button className="btn btn--primary btn--lg" onClick={begin}>
-                Start interview <ArrowRight size={18} />
+                Start interview <ArrowRight size={16} />
               </button>
             </div>
           ) : (
             <>
-              <p key={lastAi?.id} className="stage-line">
-                {lastAi?.text}
+              <p className={`stage-status stage-status--${m.status}`}>
+                {(m.status === 'connecting' || m.status === 'reconnecting') && <Loader2 size={12} className="spin" />}
+                {m.status === 'listening' && m.micOn && <span className="pulse-dot" />}
+                {STATUS_TEXT[m.status]}
+                {m.status === 'listening' && !m.micOn && ' · microphone muted'}
               </p>
-              {m.interim && <p className="stage-interim">“{m.interim}”</p>}
+              {lastAi && (
+                <p key={lastAi.id} className="stage-line">
+                  {lastAi.text}
+                </p>
+              )}
+              {m.error && (
+                <div className="notice notice--warn" role="alert">
+                  <AlertTriangle size={16} />
+                  <span>{m.error}</span>
+                </div>
+              )}
+              {m.status === 'error' && (
+                <button className="btn btn--ghost" onClick={() => location.reload()}>
+                  Reconnect
+                </button>
+              )}
             </>
           )}
         </section>
 
         {m.code && (
           <div className="code-wrap">
-            <CodeCardView
-              code={hint && !m.code.solved ? { ...m.code, feedback: `Hint: ${m.code.card.hint}` } : m.code}
-              onHint={() => setHint(true)}
-            />
+            <CodeCard code={m.code} />
           </div>
         )}
 
-        {showCaptions && started && (
-          <aside className="captions" aria-label="Live captions">
+        {showTranscript && started && (
+          <aside className="captions" aria-label="Transcript">
             <h2 className="captions-title">Transcript</h2>
             <ol ref={logRef} className="captions-log">
               {m.turns.map((t) => (
-                <li key={t.id} className={`bubble bubble--${t.who}`}>
-                  <span className="bubble-who">{t.who === 'ai' ? 'Aria' : 'You'}</span>
+                <li key={t.id} className={`bubble bubble--${t.who === 'ai' ? 'ai' : 'you'} ${t.final ? '' : 'bubble--interim'}`}>
+                  <span className="bubble-who">{t.who === 'ai' ? AI_NAME : 'You'}</span>
                   {t.text}
-                  {t.note && t.note !== 'reassured' && <span className="bubble-note">{t.note}</span>}
                 </li>
               ))}
-              {m.interim && (
-                <li className="bubble bubble--you bubble--interim">
-                  <span className="bubble-who">You</span>
-                  {m.interim}
-                </li>
-              )}
+              {m.turns.length === 0 && <li className="bubble muted">The conversation will appear here.</li>}
             </ol>
           </aside>
         )}
 
         {hasVideo && started && (
-          <div className="selfview">
+          <div className={`selfview ${presence === 'absent' || presence === 'multiple' ? 'is-alert' : ''}`}>
             <video ref={videoRef} autoPlay playsInline muted />
             <span className="selfview-pill">
-              <ShieldCheck size={13} /> All good
+              {presence === 'present' ? (
+                <>
+                  <ShieldCheck size={12} /> In view
+                </>
+              ) : presence === 'absent' ? (
+                <>
+                  <UserX size={12} /> Not visible
+                </>
+              ) : presence === 'multiple' ? (
+                <>
+                  <Users size={12} /> Multiple people
+                </>
+              ) : (
+                'Checking…'
+              )}
             </span>
           </div>
         )}
@@ -207,62 +269,61 @@ export default function Session() {
 
       {started && (
         <footer className="dock">
-          {typing && m.status !== 'ended' && (
+          {typing && live && (
             <form
               className="dock-type"
               onSubmit={(e) => {
                 e.preventDefault();
-                m.submit(draft);
+                m.submitText(draft);
                 setDraft('');
               }}
             >
               <label htmlFor="reply" className="sr-only">
-                Type your reply
+                Type your answer
               </label>
               <input
                 id="reply"
                 autoFocus
                 autoComplete="off"
-                placeholder={m.code && !m.code.solved ? 'e.g. line 3, change <= to <' : 'Type your answer…'}
+                placeholder={m.code && !m.code.solved ? 'e.g. Line 3: change <= to <' : 'Type your answer…'}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                disabled={m.status !== 'listening'}
               />
-              <button className="icon-btn icon-btn--brand" aria-label="Send" disabled={!draft.trim() || m.status !== 'listening'}>
-                <Send size={18} />
+              <button className="icon-btn icon-btn--brand" aria-label="Send" disabled={!draft.trim()}>
+                <Send size={16} />
               </button>
             </form>
           )}
           <div className="dock-controls">
-            <button className={`dock-btn ${typing ? 'is-on' : ''}`} onClick={() => setTyping((t) => !t)} aria-pressed={typing} aria-label="Type instead">
-              <Keyboard size={20} />
+            <button className={`dock-btn ${typing ? 'is-on' : ''}`} onClick={() => setTyping((t) => !t)} aria-pressed={typing} aria-label="Type instead" title="Type instead">
+              <Keyboard />
             </button>
-            <button className={`dock-btn ${showCaptions ? 'is-on' : ''}`} onClick={() => setShowCaptions((s) => !s)} aria-pressed={showCaptions} aria-label="Captions">
-              {showCaptions ? <Captions size={20} /> : <CaptionsOff size={20} />}
+            <button className={`dock-btn ${showTranscript ? 'is-on' : ''}`} onClick={() => setShowTranscript((s) => !s)} aria-pressed={showTranscript} aria-label="Transcript" title="Transcript">
+              {showTranscript ? <Captions /> : <CaptionsOff />}
             </button>
             <button
-              className={`dock-mic ${m.micOn ? '' : 'is-muted'} ${m.status === 'listening' && m.micOn ? 'is-live' : ''}`}
+              className={`dock-mic ${m.micOn ? '' : 'is-muted'}`}
               onClick={m.toggleMic}
+              disabled={!stream?.getAudioTracks().length}
               aria-pressed={!m.micOn}
               aria-label={m.micOn ? 'Mute microphone' : 'Unmute microphone'}
             >
-              {m.micOn ? <Mic size={26} /> : <MicOff size={26} />}
+              {m.micOn ? <Mic /> : <MicOff />}
             </button>
-            <button className={`dock-btn ${voice ? 'is-on' : ''}`} onClick={() => setVoice((v) => !v)} aria-pressed={voice} aria-label="Aria’s voice">
-              {voice ? <Volume2 size={20} /> : <VolumeX size={20} />}
+            <button className={`dock-btn ${voiceOn ? 'is-on' : ''}`} onClick={() => setVoiceOn((v) => !v)} aria-pressed={!voiceOn} aria-label={voiceOn ? 'Mute interviewer' : 'Unmute interviewer'} title="Interviewer audio">
+              {voiceOn ? <Volume2 /> : <VolumeX />}
             </button>
             <button
               className="dock-btn dock-btn--end"
               aria-label="End interview"
+              title="End interview"
               onClick={() => {
-                m.end();
-                navigate('/done');
+                if (confirm('End the interview now? You won’t be able to resume it.')) m.end();
               }}
             >
-              <PhoneOff size={20} />
+              <PhoneOff />
             </button>
           </div>
-          {!canRecognise && <p className="dock-note">Voice replies need Chrome or Edge. Typing works everywhere.</p>}
         </footer>
       )}
     </div>

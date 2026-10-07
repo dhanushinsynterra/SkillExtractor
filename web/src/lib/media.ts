@@ -87,7 +87,7 @@ export async function checkNetwork(): Promise<NetworkResult> {
   for (let i = 0; i < 3; i++) {
     const t0 = performance.now();
     try {
-      await fetch(`/favicon.svg?ping=${Date.now()}-${i}`, { cache: 'no-store' });
+      await fetch(`/api/status?ping=${Date.now()}-${i}`, { cache: 'no-store' });
       samples.push(performance.now() - t0);
     } catch {
       samples.push(2000);

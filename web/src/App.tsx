@@ -5,6 +5,7 @@ import Session from './screens/Session';
 import Done from './screens/Done';
 import Dashboard from './screens/Dashboard';
 import Report from './screens/Report';
+import Settings from './screens/Settings';
 
 export default function App() {
   const path = useRoute();
@@ -15,6 +16,7 @@ export default function App() {
   else if (path === '/session') screen = <Session />;
   else if (path === '/done') screen = <Done />;
   else if (path === '/admin') screen = <Dashboard />;
+  else if (path === '/admin/settings') screen = <Settings />;
   else if (report) screen = <Report id={report.id} />;
   else screen = <Start />;
 

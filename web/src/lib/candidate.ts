@@ -1,35 +1,41 @@
 import { useSyncExternalStore } from 'react';
+import type { CandidateInfo } from '../../../shared/types';
 
-/** Candidate details captured during onboarding, kept for the session. */
-export interface CandidateDraft {
-  name: string;
-  email: string;
-  track: TrackId;
+/** Candidate details and the interview session they own, kept across reloads. */
+export interface CandidateState extends CandidateInfo {
   audioOnly: boolean;
+  session: { id: string; token: string } | null;
 }
 
-export type TrackId = 'frontend' | 'backend' | 'data' | 'mobile' | 'qa';
+const KEY = 'se-candidate';
 
-export const TRACKS: { id: TrackId; label: string; blurb: string }[] = [
-  { id: 'frontend', label: 'Frontend', blurb: 'HTML, CSS, JavaScript, React' },
-  { id: 'backend', label: 'Backend', blurb: 'APIs, databases, Java / Node / Python' },
-  { id: 'data', label: 'Data & AI', blurb: 'Python, SQL, analytics, ML' },
-  { id: 'mobile', label: 'Mobile', blurb: 'Android, iOS, Flutter, React Native' },
-  { id: 'qa', label: 'Quality engineering', blurb: 'Test design, automation, APIs' },
-];
+function load(): CandidateState {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(KEY) ?? 'null');
+    if (v && typeof v === 'object') return v;
+  } catch {
+    /* storage unavailable */
+  }
+  return { name: '', email: '', track: 'frontend', audioOnly: false, session: null };
+}
 
-let draft: CandidateDraft = { name: '', email: '', track: 'frontend', audioOnly: false };
+let state = load();
 const listeners = new Set<() => void>();
 
-export function setCandidate(patch: Partial<CandidateDraft>) {
-  draft = { ...draft, ...patch };
+export function setCandidate(patch: Partial<CandidateState>) {
+  state = { ...state, ...patch };
+  try {
+    sessionStorage.setItem(KEY, JSON.stringify(state));
+  } catch {
+    /* storage unavailable */
+  }
   listeners.forEach((l) => l());
 }
 
 export function useCandidate() {
   return useSyncExternalStore(
     (l) => (listeners.add(l), () => listeners.delete(l)),
-    () => draft,
+    () => state,
   );
 }
 

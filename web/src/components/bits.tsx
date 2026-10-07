@@ -1,5 +1,5 @@
-import type { Depth, Verdict } from '../data/demo';
-import { VERDICT_LABEL } from '../data/demo';
+import type { Depth, Verdict } from '../../../shared/types';
+import { VERDICT_LABEL } from '../../../shared/types';
 
 export function Avatar({ name, size = 'md' }: { name: string; size?: 'sm' | 'md' | 'lg' }) {
   const initials = name
