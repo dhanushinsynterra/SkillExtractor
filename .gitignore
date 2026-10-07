@@ -4,3 +4,4 @@ dist
 .claude/
 server/data/
 server/.env
+server/.env.example
