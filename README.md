@@ -1,4 +1,4 @@
-# SkillExtractor
+# Synterra
 
 A voice interview platform. Candidates have a spoken conversation with **Aria**, an AI interviewer running on Gemini Live, and the hiring team gets an evidence-based report.
 

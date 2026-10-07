@@ -25,7 +25,7 @@ export function Brand({ to = '/', suffix }: { to?: string; suffix?: string }) {
       }}
     >
       <Logo />
-      <span className="brand-name">SkillExtractor</span>
+      <span className="brand-name">Synterra</span>
       {suffix && <span className="brand-suffix">{suffix}</span>}
     </a>
   );

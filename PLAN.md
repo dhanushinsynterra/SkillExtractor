@@ -1,4 +1,4 @@
-# SkillExtractor — product plan
+# Synterra — product plan
 
 A voice-based AI interviewer ("Aria") that assesses a candidate's real skill depth through conversation, with a separate admin console for the hiring team.
 

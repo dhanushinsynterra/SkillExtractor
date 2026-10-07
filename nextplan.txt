@@ -1,0 +1,3 @@
+use ADHD friendly
+use Ngnix
+cover tech debt

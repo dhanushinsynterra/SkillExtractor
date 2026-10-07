@@ -142,7 +142,7 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`SkillExtractor server on http://localhost:${PORT}`);
+  console.log(`Synterra server on http://localhost:${PORT}`);
   if (!settings.apiKey()) console.log('No Gemini API key yet: set GEMINI_API_KEY or add it in Admin → Settings.');
   if (!settings.adminPassword()) console.log('ADMIN_PASSWORD is not set: the admin console is open to anyone who can reach this server.');
 });

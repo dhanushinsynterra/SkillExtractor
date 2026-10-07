@@ -1,5 +1,5 @@
 {
-  "name": "skillextractor",
+  "name": "Synterra",
   "private": true,
   "scripts": {
     "postinstall": "npm --prefix server install && npm --prefix web install",

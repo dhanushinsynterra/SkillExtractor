@@ -3,3 +3,4 @@ dist
 .env
 .claude/
 server/data/
+server/.env
