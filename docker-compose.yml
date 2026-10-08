@@ -1,0 +1,28 @@
+name: synterra
+# docker compose up --build
+# Then open http://localhost:8080 (camera/mic work on localhost; use HTTPS elsewhere).
+services:
+  app:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    env_file:
+      - path: server/.env
+        required: false
+    volumes:
+      - synterra-data:/app/data
+    restart: unless-stopped
+
+  nginx:
+    build:
+      context: .
+      dockerfile: deploy/nginx/Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  synterra-data:

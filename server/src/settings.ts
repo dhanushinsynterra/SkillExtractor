@@ -144,6 +144,11 @@ function best(list: ModelOption[], score: (id: string) => number) {
     .sort((a, b) => score(b.id) - score(a.id) || version(b.id) - version(a.id))[0]?.id;
 }
 
+/** Picks the most suitable model of a kind from a list (exported for tests). */
+export function chooseModel(list: ModelOption[], kind: 'live' | 'text') {
+  return best(list, kind === 'live' ? liveScore : textScore);
+}
+
 /** Marks a model as refused by the API so it is never picked again. */
 export function markRefused(model: string) {
   refused.add(model);

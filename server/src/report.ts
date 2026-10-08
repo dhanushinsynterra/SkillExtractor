@@ -48,7 +48,7 @@ function fmt(ms: number) {
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 
-function buildPrompt(s: SessionRecord) {
+export function buildPrompt(s: SessionRecord) {
   const card = CODE_CARDS[s.candidate.track];
   const transcript = s.transcript.map((t) => `[${fmt(t.at)}] ${t.who === 'ai' ? 'Interviewer' : 'Candidate'}: ${t.text}`).join('\n');
   const evidence = s.evidence.map((e) => `- ${e.skill} (${e.kind}, depth ${e.depth}): ${e.evidence}`).join('\n') || '(none recorded)';

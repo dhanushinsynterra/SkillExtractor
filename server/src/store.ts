@@ -44,11 +44,26 @@ function writeNow(id: string) {
 
 export function persist(id: string, immediate = false) {
   clearTimeout(timers.get(id));
-  if (immediate) return writeNow(id);
+  if (immediate) {
+    timers.delete(id);
+    return writeNow(id);
+  }
   timers.set(
     id,
-    setTimeout(() => writeNow(id), 500),
+    setTimeout(() => {
+      timers.delete(id);
+      writeNow(id);
+    }, 500),
   );
+}
+
+/** Writes every pending change to disk immediately (used on shutdown). */
+export function flushAll() {
+  for (const [id, t] of timers) {
+    clearTimeout(t);
+    writeNow(id);
+  }
+  timers.clear();
 }
 
 export function create(candidate: CandidateInfo): { record: SessionRecord; token: string } {

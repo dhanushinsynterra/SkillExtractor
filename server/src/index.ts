@@ -13,7 +13,26 @@ import * as store from './store';
 
 const PORT = Number(process.env.SERVER_PORT ?? 8787);
 const app = express();
+app.disable('x-powered-by');
+// Behind Nginx (or another local proxy): trust it for the client IP.
+app.set('trust proxy', 'loopback, uniquelocal');
 app.use(express.json({ limit: '100kb' }));
+
+/** Small fixed-window limiter; Nginx also limits, this covers direct access. */
+function rateLimit(max: number, windowMs: number) {
+  const hits = new Map<string, { n: number; reset: number }>();
+  return (req: Request, res: Response, next: NextFunction) => {
+    const key = req.ip ?? 'unknown';
+    const now = Date.now();
+    const h = hits.get(key);
+    if (!h || h.reset < now) hits.set(key, { n: 1, reset: now + windowMs });
+    else if (++h.n > max) return res.status(429).json({ error: 'Too many requests. Please wait a minute and try again.' });
+    if (hits.size > 10_000) for (const [k, v] of hits) if (v.reset < now) hits.delete(k);
+    next();
+  };
+}
+
+app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 // ---------------------------------------------------------------------------
 // Candidate API
@@ -25,7 +44,7 @@ app.get('/api/status', (_req, res) => {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-app.post('/api/sessions', (req, res) => {
+app.post('/api/sessions', rateLimit(10, 60_000), (req, res) => {
   if (!settings.apiKey()) return res.status(503).json({ error: 'Interviews are not configured yet.' });
   const { name, email, track, prefs } = req.body ?? {};
   const candidate: CandidateInfo = {
@@ -66,7 +85,7 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
 }
 
 app.get('/api/admin/auth', (_req, res) => res.json({ required: Boolean(settings.adminPassword()) }));
-app.post('/api/admin/login', requireAdmin, (_req, res) => res.json({ ok: true }));
+app.post('/api/admin/login', rateLimit(20, 60_000), requireAdmin, (_req, res) => res.json({ ok: true }));
 
 app.get('/api/admin/settings', requireAdmin, (_req, res) => res.json(settings.view()));
 
@@ -143,6 +162,16 @@ server.on('upgrade', (req, socket, head) => {
   }
   wss.handleUpgrade(req, socket, head, (ws) => attach(ws, record));
 });
+
+function shutdown(signal: string) {
+  console.log(`${signal} received, saving sessions and shutting down.`);
+  store.flushAll();
+  wss.clients.forEach((c) => c.close(1001, 'server shutting down'));
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 server.listen(PORT, () => {
   console.log(`Synterra server on http://localhost:${PORT}`);
