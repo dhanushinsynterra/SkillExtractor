@@ -2772,3 +2772,15 @@ select:disabled {
     transform: scaleY(0.3);
   }
 }
+
+.hint {
+  max-width: 640px;
+  flex-wrap: wrap;
+}
+.hint > span {
+  flex: 1;
+  min-width: 220px;
+}
+.hint .btn {
+  margin-left: 0;
+}

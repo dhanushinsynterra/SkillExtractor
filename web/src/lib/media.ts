@@ -6,6 +6,10 @@ import { useEffect, useRef, useState } from 'react';
  */
 let shared: MediaStream | null = null;
 
+function supports(constraint: string) {
+  return Boolean((navigator.mediaDevices?.getSupportedConstraints?.() as Record<string, boolean> | undefined)?.[constraint]);
+}
+
 export type MediaStatus = 'idle' | 'asking' | 'ready' | 'denied' | 'unavailable';
 
 export async function acquireMedia(video: boolean): Promise<MediaStream> {
@@ -14,7 +18,14 @@ export async function acquireMedia(video: boolean): Promise<MediaStream> {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('unavailable');
   releaseMedia();
   shared = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1,
+      // Chrome/Edge: isolate the nearest voice from background speech where supported.
+      ...(supports('voiceIsolation') ? { voiceIsolation: true } : {}),
+    } as MediaTrackConstraints,
     video: video ? { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } : false,
   });
   return shared;
@@ -47,10 +58,12 @@ export function useMicLevel(stream: MediaStream | null, target?: React.RefObject
     src.connect(analyser);
     const buf = new Float32Array(analyser.fftSize);
     let smooth = 0;
-    let raf = 0;
-    let last = 0;
+    let n = 0;
+    void ctx.resume().catch(() => {});
 
-    const tick = (t: number) => {
+    // A timer rather than requestAnimationFrame, so the level (and voice
+    // calibration) keeps updating when the tab isn't in the foreground.
+    const tick = () => {
       analyser.getFloatTimeDomainData(buf);
       let sum = 0;
       for (const v of buf) sum += v * v;
@@ -59,15 +72,11 @@ export function useMicLevel(stream: MediaStream | null, target?: React.RefObject
       smooth = smooth * 0.75 + lvl * 0.25;
       peakRef.current = Math.max(peakRef.current, smooth);
       target?.current?.style.setProperty('--level', smooth.toFixed(3));
-      if (t - last > 100) {
-        last = t;
-        setLevel(smooth);
-      }
-      raf = requestAnimationFrame(tick);
+      if (++n % 2 === 0) setLevel(smooth);
     };
-    raf = requestAnimationFrame(tick);
+    const timer = setInterval(tick, 50);
     return () => {
-      cancelAnimationFrame(raf);
+      clearInterval(timer);
       src.disconnect();
       ctx.close();
     };

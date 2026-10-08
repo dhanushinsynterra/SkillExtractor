@@ -42,6 +42,8 @@ export class MicStreamer {
 
   async start(stream: MediaStream): Promise<AnalyserNode> {
     this.ctx = new AudioContext();
+    // Created after an await, so the browser may start it suspended.
+    await this.ctx.resume().catch(() => {});
     const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
     await this.ctx.audioWorklet.addModule(url);
     URL.revokeObjectURL(url);
@@ -104,14 +106,29 @@ export class Player {
     src.onended = () => this.sources.delete(src);
   }
 
+  /** False if the browser blocked audio output (autoplay policy). */
+  get running() {
+    return this.ctx.state === 'running';
+  }
+
   /** True while audio plays and for a short tail after (room echo decays). */
   get busy() {
-    return this.next + 0.6 > this.ctx.currentTime;
+    return this.running && this.next + 0.6 > this.ctx.currentTime;
   }
 
   /** True while queued audio is still playing. */
   get playing() {
-    return this.next > this.ctx.currentTime + 0.02;
+    return this.running && this.next > this.ctx.currentTime + 0.02;
+  }
+
+  private rmsBuf = new Float32Array(1024);
+
+  /** Current output level (RMS, 0..1), used to estimate speaker echo. */
+  rms() {
+    this.analyser.getFloatTimeDomainData(this.rmsBuf);
+    let sum = 0;
+    for (const v of this.rmsBuf) sum += v * v;
+    return Math.sqrt(sum / this.rmsBuf.length);
   }
 
   flush() {

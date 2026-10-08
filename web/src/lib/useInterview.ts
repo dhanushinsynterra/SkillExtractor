@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CandidateRequest, ClientMessage, CodeCardView, IntegrityKind, Phase, ServerMessage } from '../../../shared/types';
 import { levelOf, MicStreamer, Player } from './audio';
+import { DEFAULT_THRESHOLD, rmsOf, VoiceGate } from './voicegate';
 
 /**
  * Client side of a live interview: WebSocket to the server (which bridges to
- * Gemini Live), microphone streaming, audio playback and transcript state.
+ * Gemini Live), gated microphone streaming, audio playback and transcript.
  */
 
 export type InterviewStatus = 'idle' | 'connecting' | 'reconnecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
+
+/** Problems the candidate can act on, shown as a hint under the question. */
+export type AudioHint = 'audio_blocked' | 'mic_silent' | 'not_heard' | null;
 
 export interface Turn {
   id: number;
@@ -21,16 +25,18 @@ interface Options {
   stream: MediaStream | null;
   /** Element whose --level custom property follows the active voice. */
   levelTarget: React.RefObject<HTMLElement | null>;
-  /**
-   * Full duplex lets the candidate interrupt, but only works with headphones:
-   * on speakers the interviewer hears its own voice through the mic.
-   */
+  /** Headphones: no speaker echo, so the mic is never held back. */
   fullDuplex: boolean;
+  /** Calibrated gate level from the device check (RMS). */
+  voiceThreshold?: number | null;
+  /** Candidate asked for extra thinking time. */
+  extraTime: boolean;
 }
 
 const MAX_RECONNECT_MS = 60_000;
+const TICK_MS = 80;
 
-export function useInterview({ session, stream, levelTarget, fullDuplex }: Options) {
+export function useInterview({ session, stream, levelTarget, fullDuplex, voiceThreshold, extraTime }: Options) {
   const [status, setStatus] = useState<InterviewStatus>('idle');
   const [phase, setPhase] = useState<Phase>('hello');
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -38,24 +44,38 @@ export function useInterview({ session, stream, levelTarget, fullDuplex }: Optio
   const [micOn, setMicOn] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [endReason, setEndReason] = useState<string | null>(null);
+  const [hint, setHint] = useState<AudioHint>(null);
 
   const ws = useRef<WebSocket | null>(null);
   const player = useRef<Player | null>(null);
   const mic = useRef<MicStreamer | null>(null);
   const micAnalyser = useRef<AnalyserNode | null>(null);
+  const gate = useRef<VoiceGate | null>(null);
   const micOnRef = useRef(micOn);
   const ready = useRef(false);
   const ended = useRef(false);
   const awaitingReply = useRef(false);
   const idRef = useRef(0);
   const reconnectStart = useRef(0);
+  const extraTimeRef = useRef(extraTime);
   micOnRef.current = micOn;
-  const duplexRef = useRef(fullDuplex);
-  duplexRef.current = fullDuplex;
+  extraTimeRef.current = extraTime;
+
+  /** Local speech tracking, used to recover when the model misses a turn end. */
+  const speech = useRef({
+    active: false,
+    endedAt: 0,
+    streamEndSent: true,
+    unheardMs: 0,
+    lastSignalAt: 0,
+    lastAiAt: 0,
+  });
 
   const sendMsg = useCallback((m: ClientMessage) => {
     if (ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify(m));
   }, []);
+
+  const closeOpenTurns = useCallback(() => setTurns((ts) => ts.map((t) => (t.final ? t : { ...t, final: true }))), []);
 
   const appendDelta = useCallback((who: Turn['who'], delta: string) => {
     setTurns((ts) => {
@@ -63,7 +83,6 @@ export function useInterview({ session, stream, levelTarget, fullDuplex }: Optio
       if (last && last.who === who && !last.final) {
         return [...ts.slice(0, -1), { ...last, text: last.text + delta }];
       }
-      // A new speaker closes the previous turn.
       const closed = last && !last.final ? [...ts.slice(0, -1), { ...last, final: true }] : ts;
       return [...closed, { id: ++idRef.current, who, text: delta.trimStart(), final: false }];
     });
@@ -82,16 +101,22 @@ export function useInterview({ session, stream, levelTarget, fullDuplex }: Optio
           setStatus('listening');
           break;
         case 'transcript':
-          if (m.who === 'candidate') awaitingReply.current = true;
-          else awaitingReply.current = false;
+          if (m.who === 'candidate') {
+            awaitingReply.current = true;
+            speech.current.unheardMs = 0;
+            setHint((h) => (h === 'not_heard' ? null : h));
+          } else {
+            awaitingReply.current = false;
+            speech.current.lastAiAt = performance.now();
+          }
           appendDelta(m.who, m.delta);
           break;
         case 'turn_complete':
-          setTurns((ts) => ts.map((t) => (t.final ? t : { ...t, final: true })));
+          closeOpenTurns();
           break;
         case 'interrupted':
           player.current?.flush();
-          setTurns((ts) => ts.map((t) => (t.final ? t : { ...t, final: true })));
+          closeOpenTurns();
           break;
         case 'phase':
           setPhase(m.phase);
@@ -109,7 +134,7 @@ export function useInterview({ session, stream, levelTarget, fullDuplex }: Optio
           break;
       }
     },
-    [appendDelta],
+    [appendDelta, closeOpenTurns],
   );
 
   const connect = useCallback(() => {
@@ -121,6 +146,7 @@ export function useInterview({ session, stream, levelTarget, fullDuplex }: Optio
     sock.onmessage = (e) => {
       if (e.data instanceof ArrayBuffer) {
         awaitingReply.current = false;
+        speech.current.lastAiAt = performance.now();
         player.current?.play(e.data);
       } else onServer(JSON.parse(e.data) as ServerMessage);
     };
@@ -143,39 +169,82 @@ export function useInterview({ session, stream, levelTarget, fullDuplex }: Optio
     };
   }, [session.id, session.token, onServer]);
 
-  /** Must be called from a user gesture (audio contexts need one). */
-  const start = useCallback(async (mediaStream: MediaStream | null = stream) => {
-    if (ws.current) return;
-    setStatus('connecting');
-    setError(null);
-    player.current = new Player();
-    await player.current.resume();
-    if (mediaStream?.getAudioTracks().length) {
-      mic.current = new MicStreamer((pcm) => {
-        if (!micOnRef.current || !ready.current || ws.current?.readyState !== WebSocket.OPEN) return;
-        // Half duplex: don't stream the mic while the interviewer is talking,
-        // or speaker audio leaks back in and the model hears itself.
-        if (!duplexRef.current && player.current?.busy) return;
-        ws.current.send(pcm);
-      });
-      try {
-        micAnalyser.current = await mic.current.start(mediaStream);
-      } catch (e) {
-        console.error('Microphone pipeline failed', e);
-      }
-    }
-    connect();
-  }, [stream, connect]);
+  /** Every ~100 ms mic chunk passes through the voice gate before sending. */
+  const onMicChunk = useCallback((pcm: ArrayBuffer) => {
+    const sp = speech.current;
+    const now = performance.now();
+    if (rmsOf(new Int16Array(pcm)) > 0.002) sp.lastSignalAt = now;
+    if (!micOnRef.current || !ready.current || ws.current?.readyState !== WebSocket.OPEN || !gate.current) return;
 
-  // Drive status (speaking / thinking / listening) and the level indicator.
+    const p = player.current;
+    const r = gate.current.process(pcm, p?.rms() ?? 0, Boolean(p?.busy));
+    if (r.bargeIn) {
+      p?.flush();
+      awaitingReply.current = false;
+    }
+    ws.current.send(r.out);
+
+    if (r.speech) {
+      sp.active = true;
+      sp.streamEndSent = false;
+      sp.unheardMs += 100;
+    } else if (sp.active) {
+      sp.active = false;
+      sp.endedAt = now;
+    }
+  }, []);
+
+  /** Must be called from a user gesture (audio contexts need one). */
+  const start = useCallback(
+    async (mediaStream: MediaStream | null = stream) => {
+      if (ws.current) return;
+      setStatus('connecting');
+      setError(null);
+      gate.current = new VoiceGate(voiceThreshold ?? DEFAULT_THRESHOLD, fullDuplex);
+      player.current = new Player();
+      await player.current.resume().catch(() => {});
+      if (!player.current.running) setHint('audio_blocked');
+      if (mediaStream?.getAudioTracks().length) {
+        mic.current = new MicStreamer(onMicChunk);
+        try {
+          micAnalyser.current = await mic.current.start(mediaStream);
+          speech.current.lastSignalAt = performance.now();
+        } catch (e) {
+          console.error('Microphone pipeline failed', e);
+          setError('Your microphone could not be started. You can type your answers instead.');
+        }
+      }
+      connect();
+    },
+    [stream, connect, onMicChunk, voiceThreshold, fullDuplex],
+  );
+
+  /** Resumes blocked audio output on the next click anywhere. */
+  const unblockAudio = useCallback(async () => {
+    await player.current?.resume().catch(() => {});
+    if (player.current?.running) setHint((h) => (h === 'audio_blocked' ? null : h));
+  }, []);
+
   useEffect(() => {
-    if (status === 'idle' || status === 'ended' || status === 'error') return;
+    if (hint !== 'audio_blocked') return;
+    const on = () => void unblockAudio();
+    window.addEventListener('pointerdown', on);
+    return () => window.removeEventListener('pointerdown', on);
+  }, [hint, unblockAudio]);
+
+  // Status, level indicator and missed-turn recovery. A timer (not rAF) so it
+  // keeps working when the tab is in the background.
+  const live = status !== 'idle' && status !== 'ended' && status !== 'error';
+  useEffect(() => {
+    if (!live) return;
     const buf = new Float32Array(1024);
-    let raf = 0;
     let last = '';
-    const loop = () => {
+    const t = setInterval(() => {
       const p = player.current;
+      const sp = speech.current;
+      const now = performance.now();
       const speaking = Boolean(p?.playing);
+
       let next: InterviewStatus | null = null;
       if (ready.current) next = speaking ? 'speaking' : awaitingReply.current ? 'thinking' : 'listening';
       if (!next) last = '';
@@ -183,15 +252,28 @@ export function useInterview({ session, stream, levelTarget, fullDuplex }: Optio
         last = next;
         setStatus(next);
       }
+
       let level = 0;
       if (speaking && p) level = levelOf(p.analyser, buf);
       else if (micAnalyser.current && micOnRef.current) level = levelOf(micAnalyser.current, buf);
       levelTarget.current?.style.setProperty('--level', level.toFixed(3));
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [status === 'idle' || status === 'ended' || status === 'error', levelTarget]); // eslint-disable-line react-hooks/exhaustive-deps
+
+      if (!ready.current || !micOnRef.current) return;
+
+      // The candidate stopped talking but nothing came back: tell the model the
+      // turn is over so it doesn't wait forever on a missed end-of-speech.
+      const wait = extraTimeRef.current ? 4500 : 2500;
+      if (!sp.active && !sp.streamEndSent && sp.endedAt && now - sp.endedAt > wait && sp.lastAiAt < sp.endedAt) {
+        sp.streamEndSent = true;
+        sendMsg({ type: 'mic', on: false });
+      }
+
+      if (sp.unheardMs > 6000 && !speaking) setHint((h) => h ?? 'not_heard');
+      if (now - sp.lastSignalAt > 15000 && micAnalyser.current) setHint((h) => h ?? 'mic_silent');
+      else setHint((h) => (h === 'mic_silent' ? null : h));
+    }, TICK_MS);
+    return () => clearInterval(t);
+  }, [live, levelTarget, sendMsg]);
 
   useEffect(() => {
     ended.current = false;
@@ -209,6 +291,8 @@ export function useInterview({ session, stream, levelTarget, fullDuplex }: Optio
       if (!t) return;
       setTurns((ts) => [...ts.map((x) => (x.final ? x : { ...x, final: true })), { id: ++idRef.current, who: 'candidate', text: t, final: true }]);
       awaitingReply.current = true;
+      speech.current.unheardMs = 0;
+      setHint((h) => (h === 'not_heard' ? null : h));
       player.current?.flush();
       sendMsg({ type: 'text', text: t });
     },
@@ -245,5 +329,29 @@ export function useInterview({ session, stream, levelTarget, fullDuplex }: Optio
     setEndReason('ended_by_candidate');
   }, [sendMsg]);
 
-  return { status, phase, turns, code, micOn, error, endReason, start, submitText, toggleMic, setVolume, integrity, request, end };
+  const dismissHint = useCallback(() => {
+    speech.current.unheardMs = 0;
+    speech.current.lastSignalAt = performance.now();
+    setHint(null);
+  }, []);
+
+  return {
+    status,
+    phase,
+    turns,
+    code,
+    micOn,
+    error,
+    endReason,
+    hint,
+    start,
+    submitText,
+    toggleMic,
+    setVolume,
+    integrity,
+    request,
+    end,
+    dismissHint,
+    unblockAudio,
+  };
 }

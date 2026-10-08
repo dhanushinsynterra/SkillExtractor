@@ -9,6 +9,8 @@ export interface CandidateState extends CandidateInfo {
   extraTime: boolean;
   /** Show the elapsed-time clock (hidden by default to reduce time pressure). */
   showTimer: boolean;
+  /** Mic gate level learned from the candidate's voice during the device check. */
+  voiceThreshold: number | null;
   session: { id: string; token: string } | null;
 }
 
@@ -17,11 +19,11 @@ const KEY = 'se-candidate';
 function load(): CandidateState {
   try {
     const v = JSON.parse(sessionStorage.getItem(KEY) ?? 'null');
-    if (v && typeof v === 'object') return { headphones: false, extraTime: false, showTimer: false, ...v };
+    if (v && typeof v === 'object') return { headphones: false, extraTime: false, showTimer: false, voiceThreshold: null, ...v };
   } catch {
     /* storage unavailable */
   }
-  return { name: '', email: '', track: 'frontend', audioOnly: false, headphones: false, extraTime: false, showTimer: false, session: null };
+  return { name: '', email: '', track: 'frontend', audioOnly: false, headphones: false, extraTime: false, showTimer: false, voiceThreshold: null, session: null };
 }
 
 let state = load();

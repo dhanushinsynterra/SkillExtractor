@@ -1,4 +1,4 @@
-import { EndSensitivity, Modality, StartSensitivity, type FunctionCall, type LiveServerMessage, type Session } from '@google/genai';
+import { EndSensitivity, Modality, type FunctionCall, type LiveServerMessage, type Session } from '@google/genai';
 import type { WebSocket } from 'ws';
 import type { CandidateRequest, ClientMessage, IntegrityKind, Phase, ServerMessage, SessionRecord, SkillEvidence } from '../../shared/types';
 import { applyEdit, newCard, numbered } from './codecards';
@@ -81,6 +81,8 @@ class LiveInterview {
   private absentTimer?: NodeJS.Timeout;
   private endTimer?: NodeJS.Timeout;
   private ping?: NodeJS.Timeout;
+  /** Mic diagnostics: how much audio arrived and how loud it was. */
+  private audio = { bytes: 0, sumSq: 0, samples: 0, peak: 0, lastLog: 0, heard: false };
 
   constructor(private record: SessionRecord) {}
 
@@ -168,6 +170,18 @@ class LiveInterview {
 
   private onAudio(buf: Buffer) {
     if (!this.session || this.ended) return;
+    const a = this.audio;
+    a.bytes += buf.length;
+    for (let i = 0; i + 1 < buf.length; i += 2) {
+      const v = buf.readInt16LE(i) / 32768;
+      a.sumSq += v * v;
+      a.samples++;
+      if (Math.abs(v) > a.peak) a.peak = Math.abs(v);
+    }
+    if (Date.now() - a.lastLog > 15_000) {
+      a.lastLog = Date.now();
+      console.log(`[${this.record.id.slice(0, 8)}] mic: ${this.diag()}`);
+    }
     this.session.sendRealtimeInput({ audio: { data: buf.toString('base64'), mimeType: 'audio/pcm;rate=16000' } });
   }
 
@@ -189,11 +203,11 @@ class LiveInterview {
           outputAudioTranscription: {},
           tools: [{ functionDeclarations: TOOLS }],
           contextWindowCompression: { slidingWindow: {} },
-          // Tolerate thinking pauses and ignore background noise so the
-          // interviewer doesn't jump in mid-answer.
+          // The browser already gates background noise and speaker echo, so
+          // speech start uses the default (responsive) detector; the end is
+          // patient so thinking pauses don't cut the candidate off.
           realtimeInputConfig: {
             automaticActivityDetection: {
-              startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_LOW,
               endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
               prefixPaddingMs: 200,
               silenceDurationMs: this.record.candidate.prefs?.extraTime ? 2200 : 1200,
@@ -265,6 +279,7 @@ class LiveInterview {
         if (data && this.ws?.readyState === this.ws?.OPEN) this.ws?.send(Buffer.from(data, 'base64'));
       }
       if (c.inputTranscription?.text) {
+        this.audio.heard = true;
         this.flushAi();
         this.userBuf += c.inputTranscription.text;
         send(this.ws, { type: 'transcript', who: 'candidate', delta: c.inputTranscription.text });
@@ -373,8 +388,15 @@ class LiveInterview {
 
   // ---------------------------------------------------------------------------
 
+  private diag() {
+    const a = this.audio;
+    const db = (x: number) => (x > 0 ? (20 * Math.log10(x)).toFixed(0) : '-inf');
+    return `${(a.bytes / 32000).toFixed(1)}s received, avg ${db(Math.sqrt(a.sumSq / Math.max(1, a.samples)))} dBFS, peak ${db(a.peak)} dBFS, speech recognised: ${a.heard ? 'yes' : 'no'}`;
+  }
+
   private finish(reason: 'completed' | 'ended_by_candidate' | 'terminated' | 'abandoned') {
     if (this.ended) return;
+    console.log(`[${this.record.id.slice(0, 8)}] ended (${reason}). mic: ${this.diag()}`);
     this.ended = true;
     [this.graceTimer, this.absentTimer, this.endTimer].forEach((t) => clearTimeout(t));
     clearInterval(this.ping);

@@ -86,7 +86,14 @@ export default function Session() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const logRef = useRef<HTMLOListElement>(null);
 
-  const m = useInterview({ session: session ?? { id: '', token: '' }, stream, levelTarget: voiceRef, fullDuplex: candidate.headphones });
+  const m = useInterview({
+    session: session ?? { id: '', token: '' },
+    stream,
+    levelTarget: voiceRef,
+    fullDuplex: candidate.headphones,
+    voiceThreshold: candidate.voiceThreshold,
+    extraTime: candidate.extraTime,
+  });
   const live = started && m.status !== 'ended' && m.status !== 'error';
   const clock = useClock(live);
   const hasVideo = Boolean(stream?.getVideoTracks().length);
@@ -223,7 +230,6 @@ export default function Session() {
                 {m.status === 'listening' && m.micOn && <span className="pulse-dot" />}
                 {STATUS_TEXT[m.status]}
                 {m.status === 'listening' && !m.micOn && ' · microphone muted'}
-                {m.status === 'speaking' && !candidate.headphones && ' · mic paused'}
               </p>
               {lastAi && (() => {
                 const { lead, question } = splitQuestion(lastAi.text);
@@ -245,6 +251,34 @@ export default function Session() {
                   <button className="btn btn--ghost btn--sm" onClick={() => m.request('pause')}>
                     <Coffee size={14} /> I need a moment
                   </button>
+                </div>
+              )}
+              {m.hint && live && (
+                <div className="notice notice--warn hint" role="status">
+                  <AlertTriangle size={16} />
+                  <span>
+                    {m.hint === 'audio_blocked'
+                      ? `Your browser blocked ${AI_NAME}’s audio. Click anywhere on the page to turn sound on.`
+                      : m.hint === 'mic_silent'
+                        ? 'We can’t hear anything from your microphone. Check it isn’t muted and that the right mic is selected in your browser.'
+                        : `${AI_NAME} may not have caught that. Try speaking a little closer to the mic, or type your answer.`}
+                  </span>
+                  {m.hint !== 'audio_blocked' && (
+                    <>
+                      <button
+                        className="btn btn--ghost btn--sm"
+                        onClick={() => {
+                          setTyping(true);
+                          m.dismissHint();
+                        }}
+                      >
+                        <Keyboard size={14} /> Type instead
+                      </button>
+                      <button className="btn btn--ghost btn--sm" onClick={m.dismissHint}>
+                        Dismiss
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
               {m.error && (

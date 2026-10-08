@@ -6,6 +6,7 @@ import { chime } from '../lib/audio';
 import { setCandidate, useCandidate } from '../lib/candidate';
 import { acquireMedia, checkNetwork, type NetworkResult, useMicLevel } from '../lib/media';
 import { Proctor, type Presence } from '../lib/proctor';
+import { calibrate } from '../lib/voicegate';
 import { navigate } from '../lib/router';
 
 type Perm = 'idle' | 'asking' | 'ready' | 'denied';
@@ -27,6 +28,8 @@ export default function Check() {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [hasCam, setHasCam] = useState(false);
   const [heard, setHeard] = useState(false);
+  const [calibrated, setCalibrated] = useState(false);
+  const samples = useRef<number[]>([]);
   const [net, setNet] = useState<NetworkResult | null>(null);
   const [speaker, setSpeaker] = useState<'idle' | 'playing' | 'done'>('idle');
   const [presence, setPresence] = useState<Presence>('unknown');
@@ -45,7 +48,18 @@ export default function Check() {
 
   useEffect(() => {
     if (level > 0.15) setHeard(true);
-  }, [level]);
+    // Learn the candidate's speaking level so background voices can be filtered.
+    if (!stream || calibrated) return;
+    samples.current.push(level / 6);
+    if (samples.current.length > 300) samples.current.shift();
+    if (samples.current.filter((l) => l > 0.02).length >= 20) {
+      const t = calibrate(samples.current);
+      if (t) {
+        setCandidate({ voiceThreshold: t });
+        setCalibrated(true);
+      }
+    }
+  }, [level, stream, calibrated]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -140,10 +154,10 @@ export default function Check() {
               <div className="check-body">
                 <div className="check-title">
                   Microphone
-                  {perm !== 'ready' ? <Status state="idle">Waiting</Status> : heard ? <Status state="ok">Working</Status> : <Status state="wait">Say something</Status>}
+                  {perm !== 'ready' ? <Status state="idle">Waiting</Status> : calibrated ? <Status state="ok">Voice calibrated</Status> : heard ? <Status state="wait">Keep talking</Status> : <Status state="wait">Say something</Status>}
                 </div>
                 <p className="check-prompt">
-                  Try saying <strong>“Hi {AI_NAME}, I’m ready to begin.”</strong>
+                  Say a sentence or two in your normal voice, e.g. <strong>“Hi {AI_NAME}, I’m ready to begin.”</strong> This teaches the filter what you sound like so background voices are ignored.
                 </p>
                 <div className="meter" ref={meterRef} role="meter" aria-label="Microphone level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(level * 100)}>
                   {Array.from({ length: bars }, (_, i) => (
@@ -203,8 +217,8 @@ export default function Check() {
                 </label>
                 <p className="small muted">
                   {c.headphones
-                    ? `You can interrupt ${AI_NAME} mid-sentence.`
-                    : `On speakers, your mic pauses while ${AI_NAME} is talking to prevent echo. Wait until ${AI_NAME} finishes before answering.`}
+                    ? `You can interrupt ${AI_NAME} at any time.`
+                    : `On speakers, ${AI_NAME}’s own voice is filtered out of your mic. You can still interrupt by speaking up.`}
                 </p>
               </div>
             </div>
