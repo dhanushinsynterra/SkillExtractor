@@ -35,7 +35,12 @@ export default function Start() {
     setBusy(true);
     setErr(null);
     try {
-      const session = await api.createSession({ name: c.name.trim(), email: c.email.trim(), track: c.track });
+      const session = await api.createSession({
+        name: c.name.trim(),
+        email: c.email.trim(),
+        track: c.track,
+        prefs: { extraTime: c.extraTime },
+      });
       setCandidate({ session });
       navigate('/check');
     } catch (e) {
@@ -165,6 +170,26 @@ export default function Start() {
                 </label>
               ))}
             </div>
+          </fieldset>
+
+          <fieldset className="field prefs">
+            <legend>Comfort settings</legend>
+            <label className="switch">
+              <input type="checkbox" checked={c.extraTime} onChange={(e) => setCandidate({ extraTime: e.target.checked })} />
+              <span className="switch-track" aria-hidden="true" />
+              <span>
+                Give me extra time to think
+                <small>{AI_NAME} waits longer before responding to pauses.</small>
+              </span>
+            </label>
+            <label className="switch">
+              <input type="checkbox" checked={c.showTimer} onChange={(e) => setCandidate({ showTimer: e.target.checked })} />
+              <span className="switch-track" aria-hidden="true" />
+              <span>
+                Show a timer
+                <small>Hidden by default. There is no time limit per question.</small>
+              </span>
+            </label>
           </fieldset>
 
           <label className={`consent ${touched && !consent ? 'consent--err' : ''}`}>

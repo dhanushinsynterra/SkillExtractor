@@ -196,6 +196,16 @@ export default function Check() {
                 <button className="btn btn--ghost btn--sm" onClick={testSpeaker} disabled={speaker === 'playing'}>
                   {speaker === 'playing' ? <Loader2 size={14} className="spin" /> : <Volume2 size={14} />} Play test sound
                 </button>
+                <label className="switch">
+                  <input type="checkbox" checked={c.headphones} onChange={(e) => setCandidate({ headphones: e.target.checked })} />
+                  <span className="switch-track" aria-hidden="true" />
+                  I’m wearing headphones
+                </label>
+                <p className="small muted">
+                  {c.headphones
+                    ? `You can interrupt ${AI_NAME} mid-sentence.`
+                    : `On speakers, your mic pauses while ${AI_NAME} is talking to prevent echo. Wait until ${AI_NAME} finishes before answering.`}
+                </p>
               </div>
             </div>
 

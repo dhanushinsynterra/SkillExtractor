@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ClientMessage, CodeCardView, IntegrityKind, Phase, ServerMessage } from '../../../shared/types';
+import type { CandidateRequest, ClientMessage, CodeCardView, IntegrityKind, Phase, ServerMessage } from '../../../shared/types';
 import { levelOf, MicStreamer, Player } from './audio';
 
 /**
@@ -21,11 +21,16 @@ interface Options {
   stream: MediaStream | null;
   /** Element whose --level custom property follows the active voice. */
   levelTarget: React.RefObject<HTMLElement | null>;
+  /**
+   * Full duplex lets the candidate interrupt, but only works with headphones:
+   * on speakers the interviewer hears its own voice through the mic.
+   */
+  fullDuplex: boolean;
 }
 
 const MAX_RECONNECT_MS = 60_000;
 
-export function useInterview({ session, stream, levelTarget }: Options) {
+export function useInterview({ session, stream, levelTarget, fullDuplex }: Options) {
   const [status, setStatus] = useState<InterviewStatus>('idle');
   const [phase, setPhase] = useState<Phase>('hello');
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -45,6 +50,8 @@ export function useInterview({ session, stream, levelTarget }: Options) {
   const idRef = useRef(0);
   const reconnectStart = useRef(0);
   micOnRef.current = micOn;
+  const duplexRef = useRef(fullDuplex);
+  duplexRef.current = fullDuplex;
 
   const sendMsg = useCallback((m: ClientMessage) => {
     if (ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify(m));
@@ -84,6 +91,7 @@ export function useInterview({ session, stream, levelTarget }: Options) {
           break;
         case 'interrupted':
           player.current?.flush();
+          setTurns((ts) => ts.map((t) => (t.final ? t : { ...t, final: true })));
           break;
         case 'phase':
           setPhase(m.phase);
@@ -144,7 +152,11 @@ export function useInterview({ session, stream, levelTarget }: Options) {
     await player.current.resume();
     if (mediaStream?.getAudioTracks().length) {
       mic.current = new MicStreamer((pcm) => {
-        if (micOnRef.current && ready.current && ws.current?.readyState === WebSocket.OPEN) ws.current.send(pcm);
+        if (!micOnRef.current || !ready.current || ws.current?.readyState !== WebSocket.OPEN) return;
+        // Half duplex: don't stream the mic while the interviewer is talking,
+        // or speaker audio leaks back in and the model hears itself.
+        if (!duplexRef.current && player.current?.busy) return;
+        ws.current.send(pcm);
       });
       try {
         micAnalyser.current = await mic.current.start(mediaStream);
@@ -181,15 +193,15 @@ export function useInterview({ session, stream, levelTarget }: Options) {
     return () => cancelAnimationFrame(raf);
   }, [status === 'idle' || status === 'ended' || status === 'error', levelTarget]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    ended.current = false;
+    return () => {
       ended.current = true;
       ws.current?.close();
       mic.current?.stop();
       player.current?.close();
-    },
-    [],
-  );
+    };
+  }, []);
 
   const submitText = useCallback(
     (text: string) => {
@@ -214,6 +226,16 @@ export function useInterview({ session, stream, levelTarget }: Options) {
     if (player.current) player.current.volume = on ? 1 : 0;
   }, []);
 
+  /** Help buttons: ask the interviewer to repeat, rephrase or wait. */
+  const request = useCallback(
+    (kind: CandidateRequest) => {
+      player.current?.flush();
+      awaitingReply.current = kind !== 'pause';
+      sendMsg({ type: 'request', kind });
+    },
+    [sendMsg],
+  );
+
   const integrity = useCallback((kind: IntegrityKind, note: string) => sendMsg({ type: 'integrity', kind, note }), [sendMsg]);
 
   const end = useCallback(() => {
@@ -223,5 +245,5 @@ export function useInterview({ session, stream, levelTarget }: Options) {
     setEndReason('ended_by_candidate');
   }, [sendMsg]);
 
-  return { status, phase, turns, code, micOn, error, endReason, start, submitText, toggleMic, setVolume, integrity, end };
+  return { status, phase, turns, code, micOn, error, endReason, start, submitText, toggleMic, setVolume, integrity, request, end };
 }

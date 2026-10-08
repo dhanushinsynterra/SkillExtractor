@@ -48,10 +48,17 @@ export const DEPTH_LABEL: Record<Depth, string> = {
   4: 'Expert',
 };
 
+/** Comfort settings the candidate chooses before the interview. */
+export interface CandidatePrefs {
+  /** Longer pauses are allowed before the interviewer responds. */
+  extraTime: boolean;
+}
+
 export interface CandidateInfo {
   name: string;
   email: string;
   track: TrackId;
+  prefs?: CandidatePrefs;
 }
 
 export interface TranscriptTurn {
@@ -162,7 +169,11 @@ export type ClientMessage =
   | { type: 'text'; text: string }
   | { type: 'mic'; on: boolean }
   | { type: 'integrity'; kind: IntegrityKind; note: string }
+  | { type: 'request'; kind: CandidateRequest }
   | { type: 'end' };
+
+/** On-screen help buttons the candidate can press at any time. */
+export type CandidateRequest = 'repeat' | 'rephrase' | 'pause';
 
 export type ServerMessage =
   | { type: 'ready'; resumed: boolean; phase: Phase; transcript: TranscriptTurn[]; code: CodeCardView | null }

@@ -1,7 +1,7 @@
 import { Type, type Schema } from '@google/genai';
 import { TRACK_LABEL, type Report, type SessionRecord } from '../../shared/types';
 import { CODE_CARDS } from './codecards';
-import { client, friendlyError, settings } from './settings';
+import { client, ensureModels, friendlyError, markRefused } from './settings';
 import { persist } from './store';
 
 const SCHEMA: Schema = {
@@ -62,6 +62,7 @@ function buildPrompt(s: SessionRecord) {
 Rules:
 - Base every judgement on the transcript. Quote or paraphrase the candidate in skill evidence.
 - Do NOT penalise accent, grammar, nervousness or speech-recognition errors in the transcript; judge technical substance.
+- Do NOT penalise asking for questions to be repeated or rephrased, taking time to think, long pauses, or brief tangents. These are neutral, and many neurodivergent candidates rely on them.
 - Integrity events are context for a human reviewer. Only use verdict "review" when they materially matter; never treat them as proof of cheating.
 - If the interview is too short to judge, use verdict "review" and say so in the summary.
 - verdict: strong (clearly ready for the next round), promising (good, with gaps to probe), review (a human should look before deciding), hold (not ready yet).
@@ -91,11 +92,25 @@ export async function generateReport(s: SessionRecord): Promise<void> {
   s.reportError = undefined;
   persist(s.id);
   try {
-    const res = await client().models.generateContent({
-      model: settings().reportModel,
-      contents: buildPrompt(s),
-      config: { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.2 },
-    });
+    const ask = async (model: string) =>
+      client().models.generateContent({
+        model,
+        contents: buildPrompt(s),
+        config: { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.2 },
+      });
+    // Retired models can still be listed but answer 404; skip them and retry.
+    let res;
+    for (let attempt = 0; ; attempt++) {
+      const model = (await ensureModels()).reportModel;
+      try {
+        res = await ask(model);
+        break;
+      } catch (e) {
+        if ((e as { status?: number }).status !== 404 || attempt >= 3) throw e;
+        console.warn(`Report model ${model} was refused (404); trying another.`);
+        markRefused(model);
+      }
+    }
     const r = JSON.parse(res.text ?? '{}') as Report;
     s.report = {
       ...r,

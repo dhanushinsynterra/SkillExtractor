@@ -1,10 +1,10 @@
-import { Modality, type LiveServerMessage, type Session, type FunctionCall } from '@google/genai';
+import { EndSensitivity, Modality, StartSensitivity, type FunctionCall, type LiveServerMessage, type Session } from '@google/genai';
 import type { WebSocket } from 'ws';
-import type { ClientMessage, IntegrityKind, Phase, ServerMessage, SessionRecord, SkillEvidence } from '../../shared/types';
+import type { CandidateRequest, ClientMessage, IntegrityKind, Phase, ServerMessage, SessionRecord, SkillEvidence } from '../../shared/types';
 import { applyEdit, newCard, numbered } from './codecards';
 import { systemPrompt, TOOLS } from './prompt';
 import { generateReport } from './report';
-import { client, friendlyError, settings } from './settings';
+import { client, ensureModels, friendlyError } from './settings';
 import { persist } from './store';
 
 /**
@@ -27,6 +27,22 @@ const NOTICES: Partial<Record<IntegrityKind, string>> = {
     '[Proctoring notice] More than one person appears to be visible on camera. Politely remind the candidate that the interview must be completed on their own, then continue.',
   tab_hidden:
     '[Proctoring notice] The candidate switched away from the interview window. Gently ask them to keep the interview window in focus, then continue.',
+};
+
+const REQUESTS: Record<CandidateRequest, { notice: string; log: string }> = {
+  repeat: {
+    notice: '[Candidate request] Please repeat your last question word for word, slowly.',
+    log: '(Asked Aria to repeat the question)',
+  },
+  rephrase: {
+    notice: '[Candidate request] Please rephrase your last question more simply, in one short, concrete sentence.',
+    log: '(Asked Aria to rephrase the question)',
+  },
+  pause: {
+    notice:
+      "[Candidate request] The candidate needs a moment to think. Say only \"Of course, take your time.\" and then stay completely silent until they speak again.",
+    log: '(Asked for a moment to think)',
+  },
 };
 
 const live = new Map<string, LiveInterview>();
@@ -135,6 +151,15 @@ class LiveInterview {
       case 'integrity':
         this.onIntegrity(msg.kind, msg.note);
         break;
+      case 'request': {
+        const r = REQUESTS[msg.kind];
+        if (!r || !this.session || this.ended) return;
+        this.flushUser();
+        this.flushAi();
+        this.pushTurn('candidate', r.log);
+        this.session.sendClientContent({ turns: [{ role: 'user', parts: [{ text: r.notice }] }], turnComplete: true });
+        break;
+      }
       case 'end':
         this.finish('ended_by_candidate');
         break;
@@ -152,7 +177,7 @@ class LiveInterview {
       return;
     }
     this.started = true;
-    const { liveModel, voice } = settings();
+    const { liveModel, voice } = await ensureModels();
     try {
       this.session = await client().live.connect({
         model: liveModel,
@@ -164,6 +189,16 @@ class LiveInterview {
           outputAudioTranscription: {},
           tools: [{ functionDeclarations: TOOLS }],
           contextWindowCompression: { slidingWindow: {} },
+          // Tolerate thinking pauses and ignore background noise so the
+          // interviewer doesn't jump in mid-answer.
+          realtimeInputConfig: {
+            automaticActivityDetection: {
+              startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_LOW,
+              endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
+              prefixPaddingMs: 200,
+              silenceDurationMs: this.record.candidate.prefs?.extraTime ? 2200 : 1200,
+            },
+          },
         },
         callbacks: {
           onmessage: (m) => this.onGemini(m),
@@ -189,7 +224,7 @@ class LiveInterview {
     persist(this.record.id);
     send(this.ws, this.readyMessage(false));
     this.session.sendClientContent({
-      turns: [{ role: 'user', parts: [{ text: '[Session start] The candidate is connected. Begin the interview now.' }] }],
+      turns: [{ role: 'user', parts: [{ text: '[Session start] The candidate has joined. Greet them in one short sentence using their first name, say this is a relaxed conversation of about 20 minutes, and ask if they are ready. Then stop and wait for their answer.' }] }],
       turnComplete: true,
     });
   }

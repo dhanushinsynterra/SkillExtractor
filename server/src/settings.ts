@@ -115,3 +115,74 @@ export function friendlyError(e: unknown): string {
     return raw;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Model resolution: Gemini model IDs are retired over time (sometimes still
+// listed but refused with 404), so pick the newest suitable model unless the
+// admin chose one, and skip any model that has been refused.
+// ---------------------------------------------------------------------------
+
+let modelCache: { at: number; live: ModelOption[]; text: ModelOption[] } | null = null;
+const MODEL_CACHE_MS = 10 * 60_000;
+const refused = new Set<string>();
+
+const version = (id: string) => Number(id.match(/gemini-(\d+(?:\.\d+)?)/)?.[1] ?? 0);
+
+function liveScore(id: string) {
+  if (/transcribe|translate|robotics|tts/.test(id)) return -100;
+  return (/thinking/.test(id) ? -2 : 0) + (/preview|exp/.test(id) ? -1 : 0) + (/latest/.test(id) ? -0.5 : 0);
+}
+
+function textScore(id: string) {
+  if (/nano|image|omni|customtools|embedding|tts|robotics/.test(id)) return -100;
+  return (/flash/.test(id) ? 4 : 0) + (/lite/.test(id) ? -3 : 0) + (/preview|exp/.test(id) ? -1 : 0) + (/latest/.test(id) ? -2 : 0);
+}
+
+function best(list: ModelOption[], score: (id: string) => number) {
+  return list
+    .filter((m) => !refused.has(m.id) && score(m.id) > -100)
+    .sort((a, b) => score(b.id) - score(a.id) || version(b.id) - version(a.id))[0]?.id;
+}
+
+/** Marks a model as refused by the API so it is never picked again. */
+export function markRefused(model: string) {
+  refused.add(model);
+  if (stored.liveModel === model) stored.liveModel = undefined;
+  if (stored.reportModel === model) stored.reportModel = undefined;
+  save();
+}
+
+/** Returns working live and report models, choosing the newest when unset. */
+export async function ensureModels(force = false): Promise<{ liveModel: string; reportModel: string; voice: string }> {
+  if (force || !modelCache || Date.now() - modelCache.at > MODEL_CACHE_MS) {
+    try {
+      modelCache = { at: Date.now(), ...(await listModels()) };
+    } catch (e) {
+      console.warn('Could not list Gemini models:', friendlyError(e));
+      return settings();
+    }
+  }
+  const { live, text } = modelCache;
+  const chosenLive = stored.liveModel || process.env.GEMINI_LIVE_MODEL;
+  const chosenReport = stored.reportModel || process.env.GEMINI_REPORT_MODEL;
+  let changed = false;
+
+  if (!chosenLive || refused.has(chosenLive) || !live.some((m) => m.id === chosenLive)) {
+    const next = best(live, liveScore);
+    if (next && next !== stored.liveModel) {
+      console.log(`Live voice model: ${next}`);
+      stored.liveModel = next;
+      changed = true;
+    }
+  }
+  if (!chosenReport || refused.has(chosenReport) || !text.some((m) => m.id === chosenReport)) {
+    const next = best(text, textScore);
+    if (next && next !== stored.reportModel) {
+      console.log(`Report model: ${next}`);
+      stored.reportModel = next;
+      changed = true;
+    }
+  }
+  if (changed) save();
+  return settings();
+}

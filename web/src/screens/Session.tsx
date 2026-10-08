@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ArrowRight, Captions, CaptionsOff, Keyboard, Loader2, Mic, MicOff, PhoneOff, Send, ShieldCheck, UserX, Users, Volume2, VolumeX } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Captions, CaptionsOff, Coffee, Keyboard, Loader2, Mic, MicOff, PhoneOff, Repeat, Send, ShieldCheck, Sparkles, UserX, Users, Volume2, VolumeX } from 'lucide-react';
 import { AI_NAME, PHASES } from '../../../shared/types';
 import { Logo } from '../components/Chrome';
 import { Voice } from '../components/Voice';
@@ -29,6 +29,20 @@ function useClock(running: boolean) {
     return () => clearInterval(t);
   }, [running]);
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/**
+ * Splits an interviewer turn into the lead-in and the question being asked, so
+ * the question can stand out on its own (easier to hold in working memory).
+ */
+function splitQuestion(text: string): { lead: string; question: string } {
+  const t = text.trim();
+  const end = t.lastIndexOf('?');
+  if (end === -1) return { lead: '', question: t };
+  const before = t.slice(0, end);
+  const start = Math.max(before.lastIndexOf('. '), before.lastIndexOf('! '), before.lastIndexOf('? '));
+  const cut = start === -1 ? 0 : start + 2;
+  return { lead: t.slice(0, cut).trim(), question: t.slice(cut).trim() };
 }
 
 function CodeCard({ code }: { code: CodeCardView }) {
@@ -72,7 +86,7 @@ export default function Session() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const logRef = useRef<HTMLOListElement>(null);
 
-  const m = useInterview({ session: session ?? { id: '', token: '' }, stream, levelTarget: voiceRef });
+  const m = useInterview({ session: session ?? { id: '', token: '' }, stream, levelTarget: voiceRef, fullDuplex: candidate.headphones });
   const live = started && m.status !== 'ended' && m.status !== 'error';
   const clock = useClock(live);
   const hasVideo = Boolean(stream?.getVideoTracks().length);
@@ -161,9 +175,17 @@ export default function Session() {
           ))}
         </ol>
         <div className="session-end">
-          <span className="clock" aria-label="Elapsed time">
-            {clock}
-          </span>
+          {candidate.showTimer ? (
+            <span className="clock" aria-label="Elapsed time">
+              {clock}
+            </span>
+          ) : (
+            started && (
+              <span className="step-count">
+                Step {Math.max(1, phaseIdx + 1)} of {PHASES.length}
+              </span>
+            )
+          )}
         </div>
       </header>
 
@@ -188,7 +210,7 @@ export default function Session() {
                 Ready, {firstName(candidate.name)}?
               </h1>
               <p className="muted">
-                {AI_NAME} will open the conversation and guide you through each stage. Speak naturally. You can interrupt at any time.
+                {AI_NAME} will guide you one question at a time. Take your time, there are no trick questions. If you lose track, use Repeat or Say it simpler.
               </p>
               <button className="btn btn--primary btn--lg" onClick={begin}>
                 Start interview <ArrowRight size={16} />
@@ -201,11 +223,29 @@ export default function Session() {
                 {m.status === 'listening' && m.micOn && <span className="pulse-dot" />}
                 {STATUS_TEXT[m.status]}
                 {m.status === 'listening' && !m.micOn && ' · microphone muted'}
+                {m.status === 'speaking' && !candidate.headphones && ' · mic paused'}
               </p>
-              {lastAi && (
-                <p key={lastAi.id} className="stage-line">
-                  {lastAi.text}
-                </p>
+              {lastAi && (() => {
+                const { lead, question } = splitQuestion(lastAi.text);
+                return (
+                  <div key={lastAi.id} className="question">
+                    {lead && <p className="question-lead">{lead}</p>}
+                    <p className="stage-line">{question}</p>
+                  </div>
+                );
+              })()}
+              {live && m.status !== 'connecting' && m.status !== 'reconnecting' && (
+                <div className="help-row" role="group" aria-label="Help with this question">
+                  <button className="btn btn--ghost btn--sm" onClick={() => m.request('repeat')} disabled={!lastAi}>
+                    <Repeat size={14} /> Repeat
+                  </button>
+                  <button className="btn btn--ghost btn--sm" onClick={() => m.request('rephrase')} disabled={!lastAi}>
+                    <Sparkles size={14} /> Say it simpler
+                  </button>
+                  <button className="btn btn--ghost btn--sm" onClick={() => m.request('pause')}>
+                    <Coffee size={14} /> I need a moment
+                  </button>
+                </div>
               )}
               {m.error && (
                 <div className="notice notice--warn" role="alert">

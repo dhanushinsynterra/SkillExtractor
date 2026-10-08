@@ -27,11 +27,12 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 app.post('/api/sessions', (req, res) => {
   if (!settings.apiKey()) return res.status(503).json({ error: 'Interviews are not configured yet.' });
-  const { name, email, track } = req.body ?? {};
+  const { name, email, track, prefs } = req.body ?? {};
   const candidate: CandidateInfo = {
     name: String(name ?? '').trim().slice(0, 120),
     email: String(email ?? '').trim().slice(0, 200),
     track: String(track) as TrackId,
+    prefs: { extraTime: Boolean(prefs?.extraTime) },
   };
   if (candidate.name.length < 2) return res.status(400).json({ error: 'Name is required.' });
   if (!EMAIL_RE.test(candidate.email)) return res.status(400).json({ error: 'A valid email is required.' });
@@ -80,7 +81,9 @@ app.put('/api/admin/settings', requireAdmin, async (req, res) => {
 
 app.get('/api/admin/models', requireAdmin, async (_req, res) => {
   try {
-    res.json(await settings.listModels());
+    const models = await settings.listModels();
+    await settings.ensureModels(true);
+    res.json(models);
   } catch (e) {
     res.status(400).json({ error: settings.friendlyError(e) });
   }

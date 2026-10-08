@@ -104,6 +104,11 @@ export class Player {
     src.onended = () => this.sources.delete(src);
   }
 
+  /** True while audio plays and for a short tail after (room echo decays). */
+  get busy() {
+    return this.next + 0.6 > this.ctx.currentTime;
+  }
+
   /** True while queued audio is still playing. */
   get playing() {
     return this.next > this.ctx.currentTime + 0.02;

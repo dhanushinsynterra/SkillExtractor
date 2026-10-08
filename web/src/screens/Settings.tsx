@@ -17,7 +17,13 @@ function SettingsView() {
     setModelsErr(null);
     api
       .models()
-      .then(setModels)
+      .then(async (list) => {
+        setModels(list);
+        // The server may have replaced retired models; show what it chose.
+        const v = await api.settings();
+        setS(v);
+        setForm({ liveModel: v.liveModel, reportModel: v.reportModel, voice: v.voice });
+      })
       .catch((e) => setModelsErr(e.message));
   };
 
