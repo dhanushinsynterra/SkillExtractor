@@ -4,3 +4,4 @@ cover tech debt
 
 -- next plans --
 pasting clipboard after each question for admin review and clear it before test start.
+start from easy question to make candidate gain confidence.
