@@ -114,6 +114,13 @@ export function useInterview({ session, stream, levelTarget, fullDuplex, voiceTh
         case 'turn_complete':
           closeOpenTurns();
           break;
+        case 'retract':
+          player.current?.flush();
+          setTurns((ts) => {
+            const last = ts[ts.length - 1];
+            return last && last.who === 'ai' && !last.final ? ts.slice(0, -1) : ts;
+          });
+          break;
         case 'interrupted':
           player.current?.flush();
           closeOpenTurns();
@@ -262,7 +269,7 @@ export function useInterview({ session, stream, levelTarget, fullDuplex, voiceTh
 
       // The candidate stopped talking but nothing came back: tell the model the
       // turn is over so it doesn't wait forever on a missed end-of-speech.
-      const wait = extraTimeRef.current ? 4500 : 2500;
+      const wait = extraTimeRef.current ? 9000 : 6000;
       if (!sp.active && !sp.streamEndSent && sp.endedAt && now - sp.endedAt > wait && sp.lastAiAt < sp.endedAt) {
         sp.streamEndSent = true;
         sendMsg({ type: 'mic', on: false });

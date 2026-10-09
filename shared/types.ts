@@ -180,6 +180,8 @@ export type ServerMessage =
   | { type: 'transcript'; who: 'ai' | 'candidate'; delta: string }
   | { type: 'turn_complete' }
   | { type: 'interrupted' }
+  /** Remove the interviewer's current (unfinished) turn from the screen. */
+  | { type: 'retract' }
   | { type: 'phase'; phase: Phase }
   | { type: 'code'; code: CodeCardView }
   | { type: 'ended'; reason: 'completed' | 'terminated' | 'ended_by_candidate' }
