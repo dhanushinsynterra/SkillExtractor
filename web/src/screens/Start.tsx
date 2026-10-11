@@ -72,8 +72,8 @@ export default function Start() {
                 <Clock size={18} />
               </span>
               <div>
-                <strong>About 20 minutes</strong>
-                <span>Six short stages, at your own pace</span>
+                <strong>Up to an hour</strong>
+                <span>A conversation about everything you know, at your own pace</span>
               </div>
             </li>
             <li>

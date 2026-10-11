@@ -17,12 +17,13 @@ export const TRACKS: { id: TrackId; label: string; blurb: string }[] = [
 
 export const TRACK_LABEL = Object.fromEntries(TRACKS.map((t) => [t.id, t.label])) as Record<TrackId, string>;
 
-export type Phase = 'hello' | 'ice_breaker' | 'domain' | 'problem' | 'code_card' | 'wrap_up';
+export type Phase = 'hello' | 'ice_breaker' | 'domain' | 'adjacent' | 'problem' | 'code_card' | 'wrap_up';
 
 export const PHASES: { id: Phase; label: string }[] = [
   { id: 'hello', label: 'Introduction' },
   { id: 'ice_breaker', label: 'Warm-up' },
-  { id: 'domain', label: 'Experience' },
+  { id: 'domain', label: 'Core skills' },
+  { id: 'adjacent', label: 'Related skills' },
   { id: 'problem', label: 'Problem solving' },
   { id: 'code_card', label: 'Code review' },
   { id: 'wrap_up', label: 'Wrap-up' },
@@ -74,7 +75,46 @@ export interface SkillEvidence {
   depth: Depth;
   evidence: string;
   at: number;
+  /** Skill-map topic id this evidence belongs to. */
+  topic?: string;
 }
+
+/**
+ * One area of the candidate's skill map. Core areas come from the role
+ * itself, adjacent areas are related skills (e.g. Docker for a frontend
+ * engineer), and extra areas are anything else the candidate knows.
+ */
+export interface TopicCoverage {
+  id: string;
+  label: string;
+  kind: 'core' | 'adjacent' | 'extra';
+  /** The candidate said they use it. */
+  claimed: boolean;
+  /** Questions answered on this topic. */
+  asked: number;
+  /** Depth of each answer, in order. */
+  history: Depth[];
+  /** The sub-topic each answer was about (parallel to history). */
+  asks: string[];
+  /** Highest depth demonstrated, or null if never assessed. */
+  depth: Depth | null;
+  status: 'pending' | 'active' | 'done';
+  /** Depth level the next question should probe. */
+  level: Depth;
+  /** Aspects of the topic to explore, in order. */
+  subtopics: string[];
+  /** Index of the sub-topic currently being explored. */
+  sub: number;
+  /** Reopened in the second, depth-focused pass. */
+  revisit?: boolean;
+}
+
+/** Label for each tier of the skill map, in report order. */
+export const TIER_LABEL: Record<TopicCoverage['kind'], string> = {
+  core: 'Role skills',
+  adjacent: 'Related skills',
+  extra: 'Extra skills',
+};
 
 export type IntegrityKind = 'absent' | 'returned' | 'multiple_faces' | 'camera_off' | 'reconnect' | 'tab_hidden';
 
@@ -119,6 +159,7 @@ export interface SessionRecord {
   endedAt?: string;
   transcript: TranscriptTurn[];
   evidence: SkillEvidence[];
+  coverage?: TopicCoverage[];
   integrity: IntegrityEvent[];
   code?: CodeCardView & { startedAt?: number; solvedAt?: number };
   report?: Report;

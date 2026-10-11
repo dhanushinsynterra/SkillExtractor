@@ -20,7 +20,7 @@ import {
   Wifi,
   CameraOff,
 } from 'lucide-react';
-import { AI_NAME, DEPTH_LABEL, TRACK_LABEL, type IntegrityKind, type Report as ReportData, type SessionRecord } from '../../../shared/types';
+import { AI_NAME, DEPTH_LABEL, TIER_LABEL, TRACK_LABEL, type IntegrityKind, type TopicCoverage, type Report as ReportData, type SessionRecord } from '../../../shared/types';
 import { AdminShell } from '../components/AdminShell';
 import { Avatar, DepthPips, Ring, VerdictBadge } from '../components/bits';
 import { api } from '../lib/api';
@@ -73,6 +73,93 @@ function Radar({ skills }: { skills: ReportData['skills'] }) {
         );
       })}
     </svg>
+  );
+}
+
+function SkillMap({ s }: { s: SessionRecord }) {
+  const cov = s.coverage ?? [];
+  if (!cov.length) return <p className="muted small">This interview was recorded before skill mapping was available.</p>;
+  const tiers = (['core', 'adjacent', 'extra'] as const).map((kind) => ({
+    kind,
+    items: cov
+      .filter((c) => c.kind === kind && (kind === 'core' || c.depth != null || c.claimed))
+      .sort((a, b) => (b.depth ?? -1) - (a.depth ?? -1)),
+  }));
+  const assessed = (k: TopicCoverage['kind']) => cov.filter((c) => c.kind === k && c.depth != null);
+  const avg = (list: TopicCoverage[]) => (list.length ? (list.reduce((n, c) => n + (c.depth ?? 0), 0) / list.length).toFixed(1) : '–');
+  const questions = cov.reduce((n, c) => n + c.history.length, 0);
+
+  return (
+    <>
+      <div className="map-stats">
+        {tiers.map((t) => (
+          <div key={t.kind}>
+            <span className="cc-num">
+              {assessed(t.kind).length}
+              {t.kind === 'core' && <span className="muted"> / {t.items.length}</span>}
+            </span>
+            <span className="small muted">
+              {TIER_LABEL[t.kind]} · avg {avg(assessed(t.kind))}
+            </span>
+          </div>
+        ))}
+        <div>
+          <span className="cc-num">{questions}</span>
+          <span className="small muted">answers scored</span>
+        </div>
+      </div>
+      {tiers.map((t) =>
+        t.items.length ? (
+          <section key={t.kind} className="map-tier">
+            <h4>{TIER_LABEL[t.kind]}</h4>
+            <ul className="map">
+              {t.items.map((c) => {
+                const quotes = s.evidence.filter((e) => e.topic === c.id && e.evidence);
+                return (
+                  <li key={c.id} className={c.depth == null ? 'is-na' : ''}>
+                    <details>
+                      <summary>
+                        <span className="map-name">
+                          {c.label}
+                          {c.claimed && <span className="map-tag">uses it</span>}
+                        </span>
+                        {c.depth == null ? (
+                          <span className="small muted">{c.claimed ? 'Mentioned, not assessed' : 'Not assessed'}</span>
+                        ) : (
+                          <span className="skill-depth">
+                            <DepthPips depth={c.depth} /> {DEPTH_LABEL[c.depth]}
+                            <span className="map-q">{c.history.length}q</span>
+                          </span>
+                        )}
+                      </summary>
+                      {c.history.length > 0 && (
+                        <div className="map-detail">
+                          <ol className="map-steps">
+                            {c.history.map((d, i) => (
+                              <li key={i}>
+                                <span>{c.asks?.[i] ?? 'answer'}</span>
+                                <span className="skill-depth">
+                                  <DepthPips depth={d} /> {DEPTH_LABEL[d]}
+                                </span>
+                              </li>
+                            ))}
+                          </ol>
+                          {quotes.map((e, i) => (
+                            <p key={i} className="quote">
+                              <span className="event-time">{fmt(e.at)}</span> {e.evidence}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                    </details>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ) : null,
+      )}
+    </>
   );
 }
 
@@ -315,9 +402,17 @@ function ReportView({ id }: { id: string }) {
               <Transcript s={s} />
             </article>
           ) : !r ? (
-            <article className="card">
-              <p className="muted">The report isn’t available yet. The transcript tab shows the conversation so far.</p>
-            </article>
+            <div className="tab-grid">
+              {tab === 'tech' && (
+                <article className="card card--span">
+                  <h3>Skill map</h3>
+                  <SkillMap s={s} />
+                </article>
+              )}
+              <article className="card card--span">
+                <p className="muted">The report isn’t available yet. {tab === 'tech' ? 'The skill map above updates live.' : 'The Tech tab shows the live skill map and the Transcript tab the conversation so far.'}</p>
+              </article>
+            </div>
           ) : tab === 'manager' ? (
             <div className="tab-grid">
               <article className="card card--span">
@@ -399,6 +494,10 @@ function ReportView({ id }: { id: string }) {
           ) : (
             <div className="tab-grid">
               <article className="card card--span">
+                <h3>Skill map</h3>
+                <SkillMap s={s} />
+              </article>
+              <article className="card card--span">
                 <h3>Skill depth with evidence</h3>
                 <div className="depth-legend">
                   {([1, 2, 3, 4] as const).map((d) => (
@@ -412,7 +511,7 @@ function ReportView({ id }: { id: string }) {
                   if (!items.length) return null;
                   return (
                     <div key={kind}>
-                      <h4>{kind === 'core' ? 'Core' : kind === 'related' ? 'Related' : 'Tools'}</h4>
+                      <h4>{kind === 'core' ? 'Role skills' : kind === 'related' ? 'Related skills' : 'Extra skills'}</h4>
                       <ul className="skills">
                         {items.map((k) => (
                           <li key={k.name}>

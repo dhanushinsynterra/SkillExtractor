@@ -52,6 +52,17 @@ export function buildPrompt(s: SessionRecord) {
   const card = CODE_CARDS[s.candidate.track];
   const transcript = s.transcript.map((t) => `[${fmt(t.at)}] ${t.who === 'ai' ? 'Interviewer' : 'Candidate'}: ${t.text}`).join('\n');
   const evidence = s.evidence.map((e) => `- ${e.skill} (${e.kind}, depth ${e.depth}): ${e.evidence}`).join('\n') || '(none recorded)';
+  const tier = { core: 'role skill', adjacent: 'related skill', extra: 'extra skill' } as const;
+  const coverage =
+    (s.coverage ?? [])
+      .filter((c) => c.kind === 'core' || c.asked > 0 || c.depth != null)
+      .map((c) => {
+        const head = `- ${c.label} (${tier[c.kind]}${c.claimed ? ', candidate says they use it' : ''})`;
+        if (c.depth == null) return `${head}: not assessed`;
+        const steps = c.history.map((d, i) => `${c.asks[i] ?? '?'}=${d}`).join('; ');
+        return `${head}: best depth ${c.depth}. Answers: ${steps}`;
+      })
+      .join('\n') || '(not recorded)';
   const integrity = s.integrity.map((e) => `- [${fmt(e.at)}] ${e.kind}: ${e.note}`).join('\n') || '(none)';
   const code = s.code
     ? `Card ${card.title}. Bug: ${card.bug}. Solved: ${s.code.solved}. Edit attempts: ${s.code.attempts}. Final code:\n${s.code.lines.join('\n')}`
@@ -67,6 +78,13 @@ Rules:
 - If the interview is too short to judge, use verdict "review" and say so in the summary.
 - verdict: strong (clearly ready for the next round), promising (good, with gaps to probe), review (a human should look before deciding), hold (not ready yet).
 - Merge duplicate skills; keep the most informative evidence.
+- List EVERY assessed area of the skill map below in "skills", in this order: role skills as "core", then related skills as "related", then extra skills as "tool". Name each skill specifically and give its depth with evidence.
+- An area marked "not assessed" was not reached for lack of time: never treat it as a weakness and leave it out of "skills".
+- Related and extra skills beyond the role (for example Docker for a frontend engineer) are a bonus. Never lower the verdict because the candidate lacks them.
+- The verdict and score are about the role skills first; strong related and extra skills can raise them.
+
+Skill map coverage (role skills, related skills, extra skills; each answer is aspect=depth 0-4):
+${coverage}
 
 Interviewer's live skill notes:
 ${evidence}
